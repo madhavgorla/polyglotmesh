@@ -1,0 +1,6 @@
+{
+  "name": "PolyglotMesh - GraalVM Multi-Language IDE",
+  "description": "Enterprise multi-language code execution platform powered by GraalVM Polyglot (Python & JavaScript), Spring WebFlux architecture, and React Monaco IDE.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

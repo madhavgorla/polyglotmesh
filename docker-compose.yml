@@ -1,0 +1,49 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: polyglotmesh-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-polyglotmesh}
+      POSTGRES_USER: ${POSTGRES_USER:-polyglot_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-polyglot_dev_pass}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/src/main/resources/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-polyglot_user} -d ${POSTGRES_DB:-polyglotmesh}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: polyglotmesh-backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SERVER_PORT: 8080
+      SPRING_R2DBC_URL: r2dbc:postgresql://postgres:5432/${POSTGRES_DB:-polyglotmesh}
+      SPRING_R2DBC_USERNAME: ${POSTGRES_USER:-polyglot_user}
+      SPRING_R2DBC_PASSWORD: ${POSTGRES_PASSWORD:-polyglot_dev_pass}
+      POLYGLOT_DEFAULT_TIMEOUT_MS: 3000
+      POLYGLOT_MAX_TIMEOUT_MS: 5000
+    ports:
+      - "8080:8080"
+    # OS/Container isolation hardening for untrusted code execution
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m
+    mem_limit: 1024m
+    cpus: 1.5
+
+volumes:
+  postgres_data:

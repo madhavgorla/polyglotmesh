@@ -1,5 +1,44 @@
 server:
-  port: 8080
+  port: ${SERVER_PORT:8080}
+
 spring:
   application:
     name: polyglotmesh-backend
+  codec:
+    max-in-memory-size: 512KB
+  r2dbc:
+    url: ${SPRING_R2DBC_URL:r2dbc:postgresql://localhost:5432/polyglotmesh}
+    username: ${SPRING_R2DBC_USERNAME:polyglot_user}
+    password: ${SPRING_R2DBC_PASSWORD:polyglot_dev_pass}
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:schema.sql
+
+polyglot:
+  execution:
+    default-timeout-ms: ${POLYGLOT_DEFAULT_TIMEOUT_MS:3000}
+    max-timeout-ms: ${POLYGLOT_MAX_TIMEOUT_MS:5000}
+    max-source-size-bytes: ${POLYGLOT_MAX_SOURCE_BYTES:65536}
+    max-output-length: 65536
+    statement-limit: ${POLYGLOT_STATEMENT_LIMIT:100000}
+    max-concurrent-executions: 16
+  sandbox:
+    allow-host-access: false
+    allow-io: false
+    allow-native-access: false
+    allow-process-creation: false
+    allow-thread-creation: false
+    allow-environment-access: false
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: "health,info,metrics"
