@@ -1,8 +1,8 @@
 import React from 'react';
-import { Play, Loader2, Terminal, Cpu, Shield, BarChart3, ArrowLeftRight } from 'lucide-react';
+import { Play, Loader2, Terminal, Shield, BarChart3, ArrowLeftRight, Layers } from 'lucide-react';
 import { HealthStatus, SupportedLanguage } from '../types';
 
-export type WorkspaceTab = 'editor' | 'interop' | 'performance' | 'security' | 'architecture';
+export type WorkspaceTab = 'visualiser' | 'editor' | 'interop' | 'performance' | 'security';
 
 interface NavbarProps {
   activeTab: WorkspaceTab;
@@ -24,18 +24,30 @@ export const Navbar: React.FC<NavbarProps> = ({
   healthError
 }) => {
   return (
-    <header className="sticky top-0 z-40 w-full bg-slate-900/95 backdrop-blur-md border-b border-slate-800 px-4 lg:px-6 py-3 flex items-center justify-between gap-8">
+    <header className="sticky top-0 z-40 w-full bg-slate-950/95 backdrop-blur-md border-b border-slate-800/90 px-4 lg:px-6 py-3 flex items-center justify-between gap-8">
       {/* Zone 1: Brand Title */}
       <a
         href="#top"
-        onClick={(e) => { e.preventDefault(); setActiveTab('editor'); }}
+        onClick={(e) => { e.preventDefault(); setActiveTab('visualiser'); }}
         className="text-lg font-bold tracking-tight text-white whitespace-nowrap shrink-0"
       >
         PolyglotMesh
       </a>
 
-      {/* Zone 2: Navigation Links */}
+      {/* Zone 2: 5 Single-Line Navigation Links */}
       <nav className="hidden lg:flex items-center gap-6 text-xs font-medium text-slate-400">
+        <button
+          onClick={() => setActiveTab('visualiser')}
+          className={`flex items-center gap-1.5 py-1 border-b-2 transition-colors whitespace-nowrap shrink-0 ${
+            activeTab === 'visualiser'
+              ? 'text-white border-emerald-400'
+              : 'border-transparent hover:text-slate-200'
+          }`}
+        >
+          <Layers className="w-3.5 h-3.5 text-emerald-400" />
+          <span>Visualiser</span>
+        </button>
+
         <button
           onClick={() => setActiveTab('editor')}
           className={`flex items-center gap-1.5 py-1 border-b-2 transition-colors whitespace-nowrap shrink-0 ${
@@ -81,19 +93,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           }`}
         >
           <Shield className="w-3.5 h-3.5 text-emerald-400" />
-          <span>Security & Tests</span>
-        </button>
-
-        <button
-          onClick={() => setActiveTab('architecture')}
-          className={`flex items-center gap-1.5 py-1 border-b-2 transition-colors whitespace-nowrap shrink-0 ${
-            activeTab === 'architecture'
-              ? 'text-white border-indigo-500'
-              : 'border-transparent hover:text-slate-200'
-          }`}
-        >
-          <Cpu className="w-3.5 h-3.5 text-purple-400" />
-          <span>Architecture & Docs</span>
+          <span>Security &amp; Docs</span>
         </button>
       </nav>
 

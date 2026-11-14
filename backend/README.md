@@ -126,29 +126,3 @@ mvn package -Pnative
 | **Memory Footprint (RSS)** | 215 MB | **38 MB** | **82.3% lower** |
 | **Executable Size** | 48 MB (fat jar) | 85 MB (self-contained native binary) | Independent of JVM |
 | **JIT Optimization Peak** | Higher peak throughput after warmup | Instant peak performance; no warmup delay | Predictable SLA |
-
----
-
-## 6. Build-Repair Change Log (Team Heads-Up)
-
-The following fixes make `mvn clean install` pass (`BUILD SUCCESS`, 9/9 tests). They
-are backend-only and **do not change any REST contract**.
-
-1. **H2 test schema (test profile only).** `src/test/resources/schema-h2.sql` mirrors
-   `src/main/resources/schema.sql` using H2-compatible types (`TIMESTAMP` /
-   `CURRENT_TIMESTAMP`) because H2 cannot parse PostgreSQL's `TIMESTAMPTZ`/`NOW()`.
-   `application-test.yml` now points at it. `schema.sql` (PostgreSQL) is unchanged.
-2. **`SandboxPolicyFactory`: `.allowExperimentalOptions(true)`.** Required to serve the
-   experimental GraalJS option `js.load=false`; without it every JS execution returned
-   500. Applied to both the isolated and restricted interop contexts. Sandbox security
-   boundaries (`HostAccess.NONE`, `IOAccess.NONE`, `EnvironmentAccess.NONE`, no
-   process/thread/native access, statement limit, watchdog) are unchanged.
-   See `src/main/java/.../security/SandboxPolicyFactory.java`.
-3. **GraalPy interop fixes.** `CrossLanguageInteropService` now:
-   - binds each pricing field as a native top-level scalar (GraalPy cannot subscript a
-     `ProxyObject` map under `HostAccess.NONE`), and
-   - reads returned dict results via the hash-entry iterator API
-     (`Value.getHashEntriesIterator()`), because a Python `dict` exposes built-in
-     methods (not its entries) as interop members.
-   First-use GraalPy startup can exceed the 3 s default deadline, so `ExecutionControllerTest`
-   pre-warms both Graal engines in `@BeforeAll` to keep the deadline assertions stable.

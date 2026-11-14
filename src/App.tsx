@@ -7,12 +7,24 @@ import { InteropPanel } from './components/InteropPanel';
 import { PerformanceDashboardView } from './components/PerformanceDashboardView';
 import { SecurityTestsView } from './components/SecurityTestsView';
 import { ArchitectureView } from './components/ArchitectureView';
+import { VisualiserWorkspaceView } from './components/VisualiserWorkspaceView';
+import { ProblemsExplorerView } from './components/visualizer/ProblemsExplorerView';
+import { ProblemSolverView } from './components/visualizer/ProblemSolverView';
 import { ScriptLibraryModal } from './components/ScriptLibraryModal';
 import { SupportedLanguage, ExecutionResponse, SavedScript, HealthStatus } from './types';
 import { CODE_TEMPLATES } from './data/templates';
+import { ALGORITHM_PROBLEMS, AlgorithmProblem } from './data/visualizerProblems';
+
+type AppMode = 'home' | 'problems' | 'solve' | 'sandbox';
 
 export default function App() {
+  const [appMode, setAppMode] = useState<AppMode>('home');
+  const [selectedProblem, setSelectedProblem] = useState<AlgorithmProblem>(ALGORITHM_PROBLEMS[0]);
+  const [solverLang, setSolverLang] = useState<'python' | 'javascript'>('python');
+  const [solvedIds, setSolvedIds] = useState<string[]>([]);
+
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('editor');
+  const [securitySubTab, setSecuritySubTab] = useState<'tests' | 'architecture'>('tests');
   const [language, setLanguage] = useState<SupportedLanguage>('python');
   const [code, setCode] = useState<string>(CODE_TEMPLATES[0].code);
   const [timeoutMs, setTimeoutMs] = useState<number>(3000);
@@ -36,7 +48,6 @@ export default function App() {
   const [isLibraryOpen, setIsLibraryOpen] = useState(false);
   const [libraryTab, setLibraryTab] = useState<'saved' | 'history' | 'saveNew'>('saved');
 
-  // Poll /api/health on startup
   const loadHealth = useCallback(async () => {
     try {
       const res = await fetch('/api/health');
@@ -69,7 +80,6 @@ export default function App() {
     loadScripts();
   }, [loadHealth, loadScripts]);
 
-  // Execute code via POST /api/execute
   const handleExecute = useCallback(async () => {
     if (isRunning) return;
 
@@ -79,6 +89,7 @@ export default function App() {
     }
 
     setValidationMessage(null);
+    setActiveTab('editor');
     setIsRunning(true);
     const payload = { language, code, timeoutMs };
     setLastRequestPayload(payload);
@@ -113,6 +124,7 @@ export default function App() {
   }, [isRunning, language, code, timeoutMs]);
 
   useEffect(() => {
+    if (appMode !== 'sandbox') return;
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
         e.preventDefault();
@@ -121,7 +133,7 @@ export default function App() {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleExecute]);
+  }, [appMode, handleExecute]);
 
   const handleLanguageChange = (newLang: SupportedLanguage) => {
     setLanguage(newLang);
@@ -201,11 +213,166 @@ export default function App() {
     }
   };
 
+  const openProblemInSolver = (
+    problem: AlgorithmProblem,
+    lang: 'python' | 'javascript' = 'python'
+  ) => {
+    setSelectedProblem(problem);
+    setSolverLang(lang);
+    setAppMode('solve');
+    window.scrollTo({ top: 0, behavior: 'instant' });
+  };
+
+  const tryRandomProblem = () => {
+    const random = ALGORITHM_PROBLEMS[Math.floor(Math.random() * ALGORITHM_PROBLEMS.length)];
+    openProblemInSolver(random, 'python');
+  };
+
+  // Mode 2: Dedicated Problems Explorer (Photo 5)
+  if (appMode === 'problems') {
+    return (
+      <ProblemsExplorerView
+        solvedIds={solvedIds}
+        onSelectProblem={(problem) => openProblemInSolver(problem, 'python')}
+        onGoHome={() => {
+          setAppMode('home');
+          window.scrollTo({ top: 0, behavior: 'instant' });
+        }}
+        onOpenSandbox={() => {
+          setAppMode('sandbox');
+          setActiveTab('editor');
+        }}
+      />
+    );
+  }
+
+  // Mode 3: Dedicated Split Problem Solver IDE (Photo 4 Window)
+  if (appMode === 'solve') {
+    return (
+      <ProblemSolverView
+        problem={selectedProblem}
+        initialLanguage={solverLang}
+        onBackToProblems={() => setAppMode('problems')}
+        onGoHome={() => {
+          setAppMode('home');
+          window.scrollTo({ top: 0, behavior: 'instant' });
+        }}
+        onSolved={(id) =>
+          setSolvedIds(prev => (prev.includes(id) ? prev : [...prev, id]))
+        }
+      />
+    );
+  }
+
+  // Mode 1: Clean Visualiser Landing & Animated Illustrations (Photos 4, 1, 2, 3)
+  if (appMode === 'home') {
+    const scrollToSection = (id: string) => {
+      const el = document.getElementById(id);
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    };
+
+    return (
+      <div className="min-h-screen bg-[#0a0a0a] text-neutral-100 flex flex-col font-sans">
+        {/* Clean 3-Zone Top Bar matching the minimal #0a0a0a aesthetic */}
+        <header className="sticky top-0 z-40 w-full bg-[#0a0a0a]/90 backdrop-blur-md border-b border-neutral-900 px-4 sm:px-8 py-3.5">
+          <div className="max-w-[1200px] mx-auto flex items-center justify-between gap-8">
+            <a
+              href="#top"
+              onClick={(e) => {
+                e.preventDefault();
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+              }}
+              className="text-lg font-bold tracking-tight text-white whitespace-nowrap shrink-0"
+            >
+              PolyglotMesh
+            </a>
+
+            <nav className="hidden md:flex items-center gap-7 text-xs font-medium text-neutral-400">
+              <button
+                type="button"
+                onClick={() => scrollToSection('two-sum-section')}
+                className="hover:text-white transition-colors whitespace-nowrap shrink-0"
+              >
+                Code Visualiser
+              </button>
+              <button
+                type="button"
+                onClick={() => scrollToSection('animated-illustrations')}
+                className="hover:text-white transition-colors whitespace-nowrap shrink-0"
+              >
+                Animated Illustrations
+              </button>
+              <button
+                type="button"
+                onClick={() => setAppMode('problems')}
+                className="hover:text-white transition-colors whitespace-nowrap shrink-0"
+              >
+                Problems
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setAppMode('sandbox');
+                  setActiveTab('editor');
+                }}
+                className="hover:text-white transition-colors whitespace-nowrap shrink-0"
+              >
+                Sandbox IDE
+              </button>
+            </nav>
+
+            <button
+              type="button"
+              onClick={() => setAppMode('problems')}
+              className="px-4 py-2 rounded-lg bg-emerald-400 hover:bg-emerald-300 text-neutral-950 font-semibold text-xs transition-colors whitespace-nowrap shrink-0"
+            >
+              Solve problems
+            </button>
+          </div>
+        </header>
+
+        <main className="flex-1">
+          <VisualiserWorkspaceView
+            onTryRandomProblem={tryRandomProblem}
+            onExploreProblems={() => {
+              setAppMode('problems');
+              window.scrollTo({ top: 0, behavior: 'instant' });
+            }}
+            onOpenProblem={(prob, lang) => openProblemInSolver(prob, lang || 'python')}
+          />
+        </main>
+
+        <footer className="border-t border-neutral-900 px-6 py-6 text-xs text-neutral-500">
+          <div className="max-w-[1200px] mx-auto flex flex-col sm:flex-row items-center justify-between gap-3">
+            <span>PolyglotMesh · Interactive Code Visualiser &amp; Polyglot Sandbox</span>
+            <button
+              type="button"
+              onClick={() => {
+                setAppMode('sandbox');
+                setActiveTab('editor');
+              }}
+              className="text-neutral-400 hover:text-white transition-colors"
+            >
+              Open Full GraalVM Sandbox IDE
+            </button>
+          </div>
+        </footer>
+      </div>
+    );
+  }
+
+  // Mode 4: Full PolyglotMesh Sandbox IDE (accessible via "Sandbox IDE")
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
       <Navbar
         activeTab={activeTab}
-        setActiveTab={setActiveTab}
+        setActiveTab={(tab) => {
+          if (tab === 'visualiser') {
+            setAppMode('home');
+          } else {
+            setActiveTab(tab);
+          }
+        }}
         onRun={handleExecute}
         isRunning={isRunning}
         language={language}
@@ -215,15 +382,27 @@ export default function App() {
 
       {/* Mobile Tab Switcher */}
       <div className="lg:hidden flex items-center gap-2 px-4 py-2 bg-slate-900 border-b border-slate-800 overflow-x-auto text-xs">
-        {(['editor', 'interop', 'performance', 'security', 'architecture'] as WorkspaceTab[]).map(tab => (
+        {([
+          { id: 'visualiser', label: 'Visualiser' },
+          { id: 'editor', label: 'IDE' },
+          { id: 'interop', label: 'Interop' },
+          { id: 'performance', label: 'Performance' },
+          { id: 'security', label: 'Security & Docs' }
+        ] as Array<{ id: WorkspaceTab; label: string }>).map(tab => (
           <button
-            key={tab}
-            onClick={() => setActiveTab(tab)}
-            className={`px-3 py-1 rounded-md capitalize whitespace-nowrap ${
-              activeTab === tab ? 'bg-indigo-600 text-white' : 'text-slate-400'
+            key={tab.id}
+            onClick={() => {
+              if (tab.id === 'visualiser') {
+                setAppMode('home');
+              } else {
+                setActiveTab(tab.id);
+              }
+            }}
+            className={`px-3 py-1 rounded-md whitespace-nowrap ${
+              activeTab === tab.id ? 'bg-indigo-600 text-white' : 'text-slate-400'
             }`}
           >
-            {tab}
+            {tab.label}
           </button>
         ))}
       </div>
@@ -231,7 +410,6 @@ export default function App() {
       <main className="flex-1 p-4 lg:p-5 max-w-[1760px] w-full mx-auto">
         {activeTab === 'editor' && (
           <div className="flex flex-col lg:flex-row gap-4 h-full">
-            {/* Left Sidebar: Saved Scripts & Language Selection */}
             <ScriptSidebar
               language={language}
               onSelectLanguage={handleLanguageChange}
@@ -245,7 +423,6 @@ export default function App() {
               loadingScripts={loadingScripts}
             />
 
-            {/* Main Editor & Console Split */}
             <div className="flex-1 grid grid-cols-1 xl:grid-cols-12 gap-4 min-w-0">
               <div className="xl:col-span-7 h-[540px] lg:h-[calc(100vh-145px)] flex flex-col">
                 <CodeEditor
@@ -288,8 +465,35 @@ export default function App() {
 
         {activeTab === 'interop' && <InteropPanel />}
         {activeTab === 'performance' && <PerformanceDashboardView />}
-        {activeTab === 'security' && <SecurityTestsView />}
-        {activeTab === 'architecture' && <ArchitectureView />}
+        {activeTab === 'security' && (
+          <div className="space-y-4">
+            <div className="inline-flex items-center p-1 bg-slate-900 border border-slate-800 rounded-lg text-xs">
+              <button
+                type="button"
+                onClick={() => setSecuritySubTab('tests')}
+                className={`px-3.5 py-1.5 rounded-md font-medium transition-colors whitespace-nowrap ${
+                  securitySubTab === 'tests'
+                    ? 'bg-indigo-600 text-white'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                Automated Security &amp; Contract Tests
+              </button>
+              <button
+                type="button"
+                onClick={() => setSecuritySubTab('architecture')}
+                className={`px-3.5 py-1.5 rounded-md font-medium transition-colors whitespace-nowrap ${
+                  securitySubTab === 'architecture'
+                    ? 'bg-indigo-600 text-white'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                Architecture &amp; Docs
+              </button>
+            </div>
+            {securitySubTab === 'tests' ? <SecurityTestsView /> : <ArchitectureView />}
+          </div>
+        )}
       </main>
 
       <ScriptLibraryModal
@@ -301,15 +505,6 @@ export default function App() {
         currentLanguage={language}
         initialTab={libraryTab}
       />
-
-      <footer className="w-full bg-slate-900/80 border-t border-slate-800/80 px-4 lg:px-6 py-2.5 flex flex-col sm:flex-row items-center justify-between text-xs text-slate-400 gap-2">
-        <div>
-          Infotact Solutions · <strong>PolyglotMesh</strong> · Java 21 + Spring WebFlux + GraalVM Polyglot
-        </div>
-        <div className="text-[11px] text-slate-500">
-          Press Ctrl+Enter to execute
-        </div>
-      </footer>
     </div>
   );
 }

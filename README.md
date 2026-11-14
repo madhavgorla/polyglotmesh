@@ -171,30 +171,3 @@ git remote add origin https://github.com/madhavgorla/polyglotmesh.git
 git push -u origin main
 git push origin feature/hariom-graalvm-core feature/naveen-backend-api feature/trishul-database feature/madhav-frontend
 ```
-
----
-
-## 7. Engineering Change Log
-
-> **Team-wide heads-up:** The items below were fixed so that `mvn clean install` goes
-> green (`BUILD SUCCESS`, 9/9 tests passing). Every change is contained in the backend
-> and test resources; **no public REST API contract changed**. Read the file-specific
-> notes before rebasing your feature branch.
-
-| # | Date | Component | Summary | Files touched |
-|---|------|-----------|---------|---------------|
-| 1 | 2025-11-14 | Test DB schema | Production `schema.sql` uses PostgreSQL-only types (`TIMESTAMPTZ`, `NOW()`) that the in-memory **H2 test database** cannot parse, so the Spring context failed to load and every test errored. Added an H2-compatible schema used **only** by the `test` profile; production `schema.sql` is untouched. | `backend/src/test/resources/schema-h2.sql` (new), `backend/src/test/resources/application-test.yml` |
-| 2 | 2025-11-14 | GraalVM sandbox | `SandboxPolicyFactory` sets the experimental GraalJS option `js.load=false`, which requires `allowExperimentalOptions(true)` on the `Context.Builder`. Without it every JavaScript execution threw and returned HTTP 500. Applied to both the isolated and restricted interop contexts. **Sandbox restrictions are unchanged** (`HostAccess.NONE`, `IOAccess.NONE`, `EnvironmentAccess.NONE`, no process/thread creation, statement limit, watchdog). | `backend/src/main/java/.../security/SandboxPolicyFactory.java` |
-| 3 | 2025-11-14 | GraalPy interop (Module E) | `CrossLanguageInteropService` returned failures/timouts because (a) GraalPy cannot subscript a `ProxyObject` map (`pricingData["key"]` → ``TypeError: 'foreign' object is not subscriptable``), (b) a raw Python `dict` exposes its built-in methods as interop members, breaking the old member loop, and (c) first-use GraalPy startup can exceed the 3 s default deadline. Fix: bind each pricing field as a native top-level scalar, read dict results via the hash-entry iterator API, and pre-warm both Graal engines in the test suite. | `backend/src/main/java/.../execution/CrossLanguageInteropService.java`, `backend/src/test/java/.../ExecutionControllerTest.java` |
-| 4 | 2025-11-14 | Test suite stability | Added a `@BeforeAll` GraalPy/GraalJS warm-up so the first slow interpreter-init is not counted against deadline assertions; switched the interop test to hit `/api/interop/pricing` reliably. | `backend/src/test/java/.../ExecutionControllerTest.java` |
-
-### Notes for each feature owner
-- **Hariom (GraalVM Core & Sandbox):** items 2 & 3 touch your files — the sandbox policy gained `allowExperimentalOptions(true)` (needed for the `js.load` Guard) and the interop service now reads Python dict results robustly. Sandbox security boundaries are identical.
-- **Naveen (Backend API):** item 1 changes the test datasource **only**; `/api/execute` and `/api/interop/pricing` request/response shapes are unchanged. You co-own item 3 (`CrossLanguageInteropService`) — please review its result-reading changes and adjust if you prefer a different approach, so long as `mvn test` stays green.
-- **Trishul (Persistence):** `schema.sql` (PostgreSQL) and all R2DBC entities are **unchanged**; the new `schema-h2.sql` mirrors them for tests only. Please review it as the persistence owner.
-- **Madhav (Frontend):** no frontend files changed; the API contract is identical, so the Monaco IDE flow is unaffected. `ExecutionControllerTest` (shared) gained a Graal warm-up — review at your leisure.
-
-> **Coordination rule (team-wide):** each member owns their role's files. If a fix is
-> needed inside another role's file, the owner is informed first and either fixes it
-> themselves or approves the helper's change. Fixes already in the tree (items 1–3) are
-> doing that now — please review your files and adjust as you see fit.

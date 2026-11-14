@@ -1,5 +1,5 @@
-import express, { Request, Response } from 'express';
-import { createServer as createViteServer } from 'vite';
+import express from 'express';
+import type { Request, Response } from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { spawn, execSync } from 'child_process';
@@ -956,12 +956,20 @@ app.get('/api/health', (_req: Request, res: Response) => {
 });
 
 async function startServer() {
-  const vite = await createViteServer({
-    server: { middlewareMode: true },
-    appType: 'spa',
-  });
-
-  app.use(vite.middlewares);
+  const distDir = path.join(__dirname, 'dist');
+  if (process.env.NODE_ENV === 'production' && fs.existsSync(distDir)) {
+    app.use(express.static(distDir));
+    app.get('*', (_req, res) => {
+      res.sendFile(path.join(distDir, 'index.html'));
+    });
+  } else {
+    const { createServer: createViteServer } = await import('vite');
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: 'spa',
+    });
+    app.use(vite.middlewares);
+  }
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`[PolyglotMesh] Full-Stack Server listening on http://0.0.0.0:${PORT}`);
