@@ -4,10 +4,13 @@ import com.infotact.polyglotmesh.dto.ExecutionRequest;
 import com.infotact.polyglotmesh.dto.ExecutionResponse;
 import com.infotact.polyglotmesh.dto.InteropPricingRequest;
 import com.infotact.polyglotmesh.dto.ScriptRequest;
+import com.infotact.polyglotmesh.execution.CrossLanguageInteropService;
 import com.infotact.polyglotmesh.execution.GraalPolyglotExecutionService;
 import org.junit.jupiter.api.Assumptions;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.reactive.AutoConfigureWebTestClient;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -20,6 +23,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @AutoConfigureWebTestClient
 @ActiveProfiles("test")
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
 public class ExecutionControllerTest {
 
     @Autowired
@@ -27,6 +31,34 @@ public class ExecutionControllerTest {
 
     @Autowired
     private GraalPolyglotExecutionService executionService;
+
+    @Autowired
+    private CrossLanguageInteropService interopService;
+
+    /**
+     * GraalPy (and to a lesser degree GraalJS) pay a one-off per-process warmup cost
+     * when a Context is first built inside the shared Engine. Because each Execution
+     * uses a fresh isolated Context, the very first Python execution can exceed a tight
+     * default 3-second deadline purely from interpreter initialization, before any
+     * user code runs. Pre-warm both engines so the actual test assertions measure the
+     * sandbox behaviour rather than the interpreter bootstrap cost.
+     */
+    @BeforeAll
+    void warmUpGraalRuntimes() {
+        if (executionService.isLanguageAvailable("python")) {
+            executionService.execute(new ExecutionRequest("python", "print('warmup')"));
+        }
+        if (interopService != null) {
+            try {
+                InteropPricingRequest warmup = new InteropPricingRequest();
+                warmup.setGuestLanguage("python");
+                warmup.setCustomGuestScript("{'ok': True}");
+                interopService.transformPricingData(warmup);
+            } catch (Exception ignored) {
+                // non-fatal: interop warmup is best-effort
+            }
+        }
+    }
 
     @Test
     @DisplayName("1. Valid JavaScript execution succeeds")

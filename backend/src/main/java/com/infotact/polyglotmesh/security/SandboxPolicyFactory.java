@@ -44,6 +44,7 @@ public class SandboxPolicyFactory {
                 .allowCreateProcess(false)
                 .allowCreateThread(false)
                 .allowEnvironmentAccess(EnvironmentAccess.NONE)
+                .allowExperimentalOptions(true)
                 .resourceLimits(limits)
                 .out(stdout)
                 .err(stderr);
@@ -77,6 +78,7 @@ public class SandboxPolicyFactory {
                 .allowCreateProcess(false)
                 .allowCreateThread(false)
                 .allowEnvironmentAccess(EnvironmentAccess.NONE)
+                .allowExperimentalOptions(true)
                 .resourceLimits(limits)
                 .build();
     }
