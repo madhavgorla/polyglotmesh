@@ -35,3 +35,34 @@
 ::-webkit-scrollbar-thumb:hover {
   background: rgba(115, 115, 115, 0.9);
 }
+
+/* Monaco Debugger Line Highlights & Gutter Breakpoints */
+.monaco-editor .debug-active-line {
+  background-color: rgba(180, 105, 14, 0.28) !important;
+  border-left: 2px solid #f59e0b;
+}
+
+.monaco-editor .debug-error-line {
+  background-color: rgba(225, 29, 72, 0.22) !important;
+  border-left: 2px solid #f43f5e;
+}
+
+.monaco-editor .debug-breakpoint-glyph {
+  background: #f43f5e;
+  border-radius: 9999px;
+  width: 9px !important;
+  height: 9px !important;
+  margin-left: 5px;
+  margin-top: 6px;
+  box-shadow: 0 0 0 2px rgba(244, 63, 94, 0.25);
+}
+
+.monaco-editor .debug-active-glyph {
+  width: 0 !important;
+  height: 0 !important;
+  margin-left: 5px;
+  margin-top: 5px;
+  border-top: 5px solid transparent;
+  border-bottom: 5px solid transparent;
+  border-left: 8px solid #fbbf24;
+}

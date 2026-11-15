@@ -1,18 +1,16 @@
 import React, { useState, useMemo } from 'react';
-import { PanelLeftClose, PanelLeftOpen, Layers, Grid2X2, Terminal } from 'lucide-react';
+import { PanelLeftClose, PanelLeftOpen, Layers, Grid2X2 } from 'lucide-react';
 import { ALGORITHM_PROBLEMS, ALL_TOPICS, AlgorithmProblem } from '../../data/visualizerProblems';
 
 interface ProblemsExplorerViewProps {
   onSelectProblem: (problem: AlgorithmProblem) => void;
   onGoHome: () => void;
-  onOpenSandbox: () => void;
   solvedIds: string[];
 }
 
 export const ProblemsExplorerView: React.FC<ProblemsExplorerViewProps> = ({
   onSelectProblem,
   onGoHome,
-  onOpenSandbox,
   solvedIds
 }) => {
   const [selectedTopic, setSelectedTopic] = useState<string>('All');
@@ -70,24 +68,15 @@ export const ProblemsExplorerView: React.FC<ProblemsExplorerViewProps> = ({
               <Layers className="w-4 h-4 text-emerald-400 shrink-0" />
               {sidebarOpen && <span className="whitespace-nowrap">Animated illustrations</span>}
             </button>
-
-            <button
-              type="button"
-              onClick={onOpenSandbox}
-              className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-neutral-300 hover:text-white hover:bg-neutral-800/50 text-xs font-medium transition-colors"
-            >
-              <Terminal className="w-4 h-4 text-neutral-400 shrink-0" />
-              {sidebarOpen && <span className="whitespace-nowrap">Polyglot IDE &amp; Tools</span>}
-            </button>
           </nav>
         </div>
 
         {sidebarOpen && (
           <div className="p-4 border-t border-neutral-800/80 space-y-3">
             <div className="space-y-1">
-              <div className="text-xs font-semibold text-white">Live Polyglot Sandbox</div>
+              <div className="text-xs font-semibold text-white">Interactive Debugger</div>
               <p className="text-[11px] text-neutral-400 leading-relaxed">
-                Execute Python &amp; JavaScript solutions with real syntax diagnostics and test assertions.
+                Execute Python &amp; JavaScript solutions with live line tracing and error diagnostics.
               </p>
             </div>
             <button

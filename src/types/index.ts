@@ -119,3 +119,49 @@ export interface TeamMember {
   status: 'In Review' | 'Completed' | 'Ready for Merge' | 'Tested';
   prNumber: string;
 }
+
+export interface DebugStackFrame {
+  functionName: string;
+  line: number;
+  locals: Record<string, any>;
+}
+
+export interface DebugErrorInfo {
+  type: string;
+  message: string;
+  line: number;
+  column?: number;
+}
+
+export interface DebugStep {
+  step: number;
+  line: number;
+  event: 'line' | 'call' | 'return' | 'exception' | 'complete';
+  functionName: string;
+  locals: Record<string, any>;
+  stack: DebugStackFrame[];
+  returnValue?: any;
+  stdout: string;
+  error?: DebugErrorInfo | null;
+  caption: string;
+}
+
+export interface DebugResponse {
+  success: boolean;
+  language: 'python' | 'javascript';
+  steps: DebugStep[];
+  syntaxError?: {
+    line: number;
+    column: number;
+    message: string;
+  } | null;
+  runtimeError?: {
+    type: string;
+    message: string;
+    line: number;
+    stackTrace?: string;
+  } | null;
+  finalOutput: string;
+  executionTimeMs: number;
+  truncated?: boolean;
+}

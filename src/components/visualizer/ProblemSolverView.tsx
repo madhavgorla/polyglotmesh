@@ -8,7 +8,8 @@ import {
   Loader2,
   CheckCircle2,
   XCircle,
-  RotateCcw
+  RotateCcw,
+  Bug
 } from 'lucide-react';
 import {
   AlgorithmProblem,
@@ -20,7 +21,9 @@ import {
   ContainerWaterVisual,
   LargestIslandVisual
 } from './AlgorithmIllustrations';
-import { ExecutionResponse, SupportedLanguage } from '../../types';
+import { LiveMemoryVisualiser } from './LiveMemoryVisualiser';
+import { PlaybackBar } from './PlaybackBar';
+import { DebugResponse, DebugStep, ExecutionResponse, SupportedLanguage } from '../../types';
 
 interface ProblemSolverViewProps {
   problem: AlgorithmProblem;
@@ -45,15 +48,185 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
   const [result, setResult] = useState<ExecutionResponse | null>(null);
   const [submissionStatus, setSubmissionStatus] = useState<'idle' | 'passed' | 'failed'>('idle');
   const [syntaxErrors, setSyntaxErrors] = useState<Array<{ line: number; column: number; message: string }>>([]);
+  const [debugSteps, setDebugSteps] = useState<DebugStep[]>([]);
+  const [debugStepIndex, setDebugStepIndex] = useState<number>(0);
+  const [isDebugging, setIsDebugging] = useState<boolean>(false);
+  const [isPlayingDebug, setIsPlayingDebug] = useState<boolean>(false);
+  const [debugTruncated, setDebugTruncated] = useState<boolean>(false);
+  const [debugRuntimeError, setDebugRuntimeError] = useState<{ type: string; message: string; line: number } | null>(null);
+  const [debugSyntaxError, setDebugSyntaxError] = useState<{ line: number; column: number; message: string } | null>(null);
+  const [debugDirty, setDebugDirty] = useState<boolean>(false);
+  const [breakpoints, setBreakpoints] = useState<number[]>([]);
+  const [visualiserMode, setVisualiserMode] = useState<'trace' | 'illustration'>('trace');
+  const [editorMounted, setEditorMounted] = useState<boolean>(false);
 
   const editorRef = useRef<any>(null);
   const monacoRef = useRef<any>(null);
+  const decorationsRef = useRef<any>(null);
 
   useEffect(() => {
     setCode(getProblemCode(problem, lang));
     setResult(null);
     setSubmissionStatus('idle');
+    setDebugSteps([]);
+    setDebugStepIndex(0);
+    setDebugRuntimeError(null);
+    setDebugSyntaxError(null);
+    setDebugDirty(false);
+    setIsPlayingDebug(false);
+    setBreakpoints([]);
   }, [problem, lang]);
+
+  const jumpToLine = (line: number) => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    editor.revealLineInCenter(line);
+    editor.setPosition({ lineNumber: line, column: 1 });
+    editor.focus();
+  };
+
+  const runDebugTrace = async (sourceCode = code, startPlayback = false) => {
+    setLeftTab('visualiser');
+    setVisualiserMode('trace');
+    setIsDebugging(true);
+    setIsPlayingDebug(false);
+    setDebugRuntimeError(null);
+    setDebugSyntaxError(null);
+    try {
+      const res = await fetch('/api/debug', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ language: lang, code: sourceCode, timeoutMs: 3000 })
+      });
+      const data: DebugResponse = await res.json();
+      setDebugSteps(data.steps || []);
+      setDebugTruncated(Boolean(data.truncated));
+      setDebugSyntaxError(data.syntaxError || null);
+      setDebugRuntimeError(data.runtimeError || null);
+      setDebugDirty(false);
+
+      const model = editorRef.current?.getModel();
+      if (model && monacoRef.current) {
+        const markers: any[] = [];
+        if (data.syntaxError) {
+          markers.push({
+            startLineNumber: Math.max(1, data.syntaxError.line || 1),
+            startColumn: Math.max(1, data.syntaxError.column || 1),
+            endLineNumber: Math.max(1, data.syntaxError.line || 1),
+            endColumn: model.getLineMaxColumn(Math.max(1, data.syntaxError.line || 1)) || 80,
+            message: data.syntaxError.message,
+            severity: monacoRef.current.MarkerSeverity.Error
+          });
+        } else if (data.runtimeError) {
+          markers.push({
+            startLineNumber: Math.max(1, data.runtimeError.line || 1),
+            startColumn: 1,
+            endLineNumber: Math.max(1, data.runtimeError.line || 1),
+            endColumn: model.getLineMaxColumn(Math.max(1, data.runtimeError.line || 1)) || 80,
+            message: `${data.runtimeError.type}: ${data.runtimeError.message}`,
+            severity: monacoRef.current.MarkerSeverity.Error
+          });
+        }
+        monacoRef.current.editor.setModelMarkers(model, 'solver-debug', markers);
+      }
+
+      if (data.runtimeError && (data.steps?.length || 0) > 0) {
+        const errIdx = (data.steps || []).findIndex(s => s.error);
+        setDebugStepIndex(errIdx >= 0 ? errIdx : 0);
+      } else {
+        setDebugStepIndex(0);
+        if (startPlayback && data.success && (data.steps?.length || 0) > 1) {
+          setIsPlayingDebug(true);
+        }
+      }
+    } catch (err: any) {
+      setDebugRuntimeError({
+        type: 'NetworkError',
+        message: err?.message || 'Debug trace request failed',
+        line: 1
+      });
+    } finally {
+      setIsDebugging(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!isPlayingDebug || debugSteps.length === 0) return;
+    const timer = setInterval(() => {
+      setDebugStepIndex(prev => {
+        if (prev >= debugSteps.length - 1) {
+          setIsPlayingDebug(false);
+          return prev;
+        }
+        const nextIdx = prev + 1;
+        const nextStep = debugSteps[nextIdx];
+        if (nextStep && breakpoints.includes(nextStep.line)) {
+          setIsPlayingDebug(false);
+        }
+        return nextIdx;
+      });
+    }, 650);
+    return () => clearInterval(timer);
+  }, [isPlayingDebug, debugSteps, breakpoints]);
+
+  // Apply Monaco debugger decorations (breakpoints, active step line, error line)
+  useEffect(() => {
+    const editor = editorRef.current;
+    const monaco = monacoRef.current;
+    const model = editor?.getModel();
+    if (!editor || !monaco || !model) return;
+
+    const decos: any[] = [];
+    const maxLines = model.getLineCount();
+    const currentStep = leftTab === 'visualiser' ? debugSteps[debugStepIndex] : undefined;
+    const errLine = debugSyntaxError?.line || syntaxErrors[0]?.line || currentStep?.error?.line || debugRuntimeError?.line || null;
+
+    for (const bpLine of breakpoints) {
+      if (bpLine >= 1 && bpLine <= maxLines) {
+        decos.push({
+          range: new monaco.Range(bpLine, 1, bpLine, 1),
+          options: {
+            isWholeLine: false,
+            glyphMarginClassName: 'debug-breakpoint-glyph',
+            glyphMarginHoverMessage: { value: `Breakpoint at line ${bpLine}` }
+          }
+        });
+      }
+    }
+
+    if (currentStep && currentStep.line >= 1 && currentStep.line <= maxLines && !debugDirty) {
+      const isErrLine = Boolean(currentStep.error) || errLine === currentStep.line;
+      decos.push({
+        range: new monaco.Range(currentStep.line, 1, currentStep.line, 1),
+        options: {
+          isWholeLine: true,
+          className: isErrLine ? 'debug-error-line' : 'debug-active-line',
+          glyphMarginClassName: isErrLine ? undefined : 'debug-active-glyph'
+        }
+      });
+      if (typeof editor.revealLineInCenterIfOutsideViewport === 'function') {
+        editor.revealLineInCenterIfOutsideViewport(currentStep.line);
+      } else if (typeof editor.revealLineInCenter === 'function') {
+        editor.revealLineInCenter(currentStep.line);
+      }
+    } else if (errLine && errLine >= 1 && errLine <= maxLines) {
+      decos.push({
+        range: new monaco.Range(errLine, 1, errLine, 1),
+        options: {
+          isWholeLine: true,
+          className: 'debug-error-line'
+        }
+      });
+    }
+
+    if (typeof editor.createDecorationsCollection === 'function') {
+      if (!decorationsRef.current) {
+        decorationsRef.current = editor.createDecorationsCollection(decos);
+      } else {
+        decorationsRef.current.set(decos);
+      }
+    }
+  }, [leftTab, debugSteps, debugStepIndex, breakpoints, syntaxErrors, debugSyntaxError, debugRuntimeError, debugDirty, editorMounted]);
 
   const handleEditorDidMount: OnMount = (editor, monaco) => {
     editorRef.current = editor;
@@ -73,10 +246,22 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
         'editorCursor.foreground': '#34d399',
         'editor.lineHighlightBackground': '#18181b88',
         'editorLineNumber.foreground': '#52525b',
-        'editorLineNumber.activeForeground': '#a1a1aa'
+        'editorLineNumber.activeForeground': '#a1a1aa',
+        'editorGutter.background': '#0b0b0e'
       }
     });
     monaco.editor.setTheme('ntree-obsidian');
+
+    editor.onMouseDown((e: any) => {
+      if (e.target.type === monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN && e.target.position?.lineNumber) {
+        const clickedLine = e.target.position.lineNumber;
+        setBreakpoints(prev =>
+          prev.includes(clickedLine) ? prev.filter(l => l !== clickedLine) : [...prev, clickedLine]
+        );
+      }
+    });
+
+    setEditorMounted(true);
   };
 
   // Real-time syntax markers
@@ -209,18 +394,19 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
           </button>
         </div>
 
-        {/* Center/Right Action Buttons (Visualise, Run, Submit) */}
+        {/* Center/Right Action Buttons (Visualise / Debug, Run, Submit) */}
         <div className="flex items-center gap-2 shrink-0">
           <button
             type="button"
-            onClick={() => setLeftTab(leftTab === 'visualiser' ? 'description' : 'visualiser')}
+            onClick={() => runDebugTrace(code, false)}
+            disabled={isDebugging}
             className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium border transition-colors ${
               leftTab === 'visualiser'
                 ? 'bg-amber-500/20 border-amber-400 text-amber-200'
                 : 'bg-amber-950/30 border-amber-700/50 text-amber-300 hover:bg-amber-900/40'
-            }`}
+            } disabled:opacity-50`}
           >
-            <Eye className="w-3.5 h-3.5" />
+            {isDebugging ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Eye className="w-3.5 h-3.5" />}
             <span>Visualise</span>
           </button>
 
@@ -264,7 +450,12 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
             </button>
             <button
               type="button"
-              onClick={() => setLeftTab('visualiser')}
+              onClick={() => {
+                setLeftTab('visualiser');
+                if (debugSteps.length === 0 || debugDirty) {
+                  runDebugTrace(code, false);
+                }
+              }}
               className={`py-2.5 border-b-2 transition-colors ${
                 leftTab === 'visualiser'
                   ? 'border-amber-400 text-amber-300'
@@ -329,12 +520,91 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
 
             {leftTab === 'visualiser' && (
               <div className="space-y-4">
-                <div className="rounded-xl border border-neutral-800 bg-[#09090b] p-4">
-                  {renderProblemIllustration()}
-                </div>
-                <p className="font-editorial text-sm text-neutral-400">
-                  Step through the animated state transitions above, then test your implementation on the right.
-                </p>
+                {problem.illustrationKey && problem.illustrationKey !== 'two-sum' && (
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setVisualiserMode('trace')}
+                      className={`px-3 py-1 rounded text-xs font-medium border transition-colors ${
+                        visualiserMode === 'trace'
+                          ? 'bg-amber-500/20 border-amber-500/60 text-amber-200'
+                          : 'bg-neutral-900 border-neutral-800 text-neutral-400 hover:text-white'
+                      }`}
+                    >
+                      Live Code Debugger
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setVisualiserMode('illustration')}
+                      className={`px-3 py-1 rounded text-xs font-medium border transition-colors ${
+                        visualiserMode === 'illustration'
+                          ? 'bg-emerald-500/20 border-emerald-500/60 text-emerald-200'
+                          : 'bg-neutral-900 border-neutral-800 text-neutral-400 hover:text-white'
+                      }`}
+                    >
+                      Algorithm Illustration
+                    </button>
+                  </div>
+                )}
+
+                {visualiserMode === 'illustration' && problem.illustrationKey && problem.illustrationKey !== 'two-sum' ? (
+                  <div className="rounded-xl border border-neutral-800 bg-[#09090b] p-4">
+                    {renderProblemIllustration()}
+                  </div>
+                ) : (
+                  <div className="rounded-xl border border-neutral-800 bg-[#09090b] overflow-hidden flex flex-col">
+                    <div className="flex flex-wrap items-center justify-between gap-2 px-3.5 py-2 border-b border-neutral-800 bg-neutral-950">
+                      <button
+                        type="button"
+                        onClick={() => runDebugTrace(code, false)}
+                        disabled={isDebugging}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-semibold bg-amber-950/50 border border-amber-600/50 text-amber-300 hover:bg-amber-900/50 transition-colors disabled:opacity-50"
+                      >
+                        {isDebugging ? <Loader2 className="w-3 h-3 animate-spin" /> : <Bug className="w-3 h-3" />}
+                        <span>{debugDirty ? 'Re-Debug Code' : 'Debug Code'}</span>
+                      </button>
+
+                      <PlaybackBar
+                        compact
+                        currentIndex={Math.min(debugStepIndex, Math.max(0, debugSteps.length - 1))}
+                        totalSteps={Math.max(1, debugSteps.length)}
+                        isPlaying={isPlayingDebug}
+                        onTogglePlay={() => {
+                          if (debugDirty || debugSteps.length === 0) {
+                            runDebugTrace(code, true);
+                            return;
+                          }
+                          if (!isPlayingDebug && debugStepIndex >= debugSteps.length - 1) {
+                            setDebugStepIndex(0);
+                          }
+                          setIsPlayingDebug(p => !p);
+                        }}
+                        onFirst={() => { setIsPlayingDebug(false); setDebugStepIndex(0); }}
+                        onPrev={() => { setIsPlayingDebug(false); setDebugStepIndex(s => Math.max(0, s - 1)); }}
+                        onNext={() => {
+                          setIsPlayingDebug(false);
+                          if (debugDirty || debugSteps.length === 0) {
+                            runDebugTrace(code, false);
+                          } else {
+                            setDebugStepIndex(s => Math.min(Math.max(0, debugSteps.length - 1), s + 1));
+                          }
+                        }}
+                        onLast={() => { setIsPlayingDebug(false); setDebugStepIndex(Math.max(0, debugSteps.length - 1)); }}
+                      />
+                    </div>
+
+                    <LiveMemoryVisualiser
+                      compact
+                      steps={debugSteps}
+                      stepIndex={debugStepIndex}
+                      syntaxError={debugSyntaxError || syntaxErrors[0] || null}
+                      runtimeError={debugRuntimeError}
+                      isDebugging={isDebugging}
+                      truncated={debugTruncated}
+                      onJumpToLine={jumpToLine}
+                    />
+                  </div>
+                )}
               </div>
             )}
 
@@ -390,12 +660,18 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
                 height="100%"
                 language={lang}
                 value={code}
-                onChange={(val) => setCode(val || '')}
+                onChange={(val) => {
+                  setCode(val || '');
+                  setDebugDirty(true);
+                  setIsPlayingDebug(false);
+                }}
                 onMount={handleEditorDidMount}
                 theme="ntree-obsidian"
                 options={{
                   minimap: { enabled: false },
+                  glyphMargin: true,
                   fontSize: 13,
+                  lineHeight: 21,
                   fontFamily: "'JetBrains Mono', monospace",
                   scrollBeyondLastLine: false,
                   automaticLayout: true,
