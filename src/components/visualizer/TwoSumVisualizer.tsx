@@ -7,7 +7,8 @@ import {
   Bug,
   RotateCcw,
   Loader2,
-  AlertCircle
+  AlertCircle,
+  XCircle
 } from 'lucide-react';
 import { PlaybackBar } from './PlaybackBar';
 import { LiveMemoryVisualiser } from './LiveMemoryVisualiser';
@@ -35,78 +36,128 @@ export const TwoSumVisualizer: React.FC<TwoSumVisualizerProps> = ({ onImplement 
   const editorRef = useRef<any>(null);
   const monacoRef = useRef<any>(null);
   const decorationsRef = useRef<any>(null);
+  const editSeqRef = useRef<number>(0);
 
-  const runDebug = useCallback(async (sourceCode: string, language: 'python' | 'javascript', startPlayback = false) => {
-    setIsDebugging(true);
-    setIsPlaying(false);
-    setSyntaxError(null);
-    setRuntimeError(null);
-
-    try {
-      const res = await fetch('/api/debug', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ language, code: sourceCode, timeoutMs: 3000 })
-      });
-      const data: DebugResponse = await res.json();
-
-      setSteps(data.steps || []);
-      setStepIndex(0);
-      setIsDirty(false);
-      setTruncated(Boolean(data.truncated));
-      setSyntaxError(data.syntaxError || null);
-      setRuntimeError(data.runtimeError || null);
-
+  const setEditorMarkers = useCallback(
+    (
+      synErr: { line: number; column?: number; message: string } | null,
+      runErr: { type: string; message: string; line: number } | null
+    ) => {
       const model = editorRef.current?.getModel();
-      if (model && monacoRef.current) {
-        const markers: any[] = [];
-        if (data.syntaxError) {
-          markers.push({
-            startLineNumber: Math.max(1, data.syntaxError.line || 1),
-            startColumn: Math.max(1, data.syntaxError.column || 1),
-            endLineNumber: Math.max(1, data.syntaxError.line || 1),
-            endColumn: model.getLineMaxColumn(Math.max(1, data.syntaxError.line || 1)) || 80,
-            message: data.syntaxError.message,
-            severity: monacoRef.current.MarkerSeverity.Error
-          });
-        } else if (data.runtimeError) {
-          markers.push({
-            startLineNumber: Math.max(1, data.runtimeError.line || 1),
-            startColumn: 1,
-            endLineNumber: Math.max(1, data.runtimeError.line || 1),
-            endColumn: model.getLineMaxColumn(Math.max(1, data.runtimeError.line || 1)) || 80,
-            message: `${data.runtimeError.type}: ${data.runtimeError.message}`,
-            severity: monacoRef.current.MarkerSeverity.Error
+      const monaco = monacoRef.current;
+      if (!model || !monaco) return;
+
+      const markers: any[] = [];
+      if (synErr) {
+        const line = Math.min(Math.max(1, synErr.line || 1), model.getLineCount());
+        markers.push({
+          startLineNumber: line,
+          startColumn: Math.max(1, synErr.column || 1),
+          endLineNumber: line,
+          endColumn: model.getLineMaxColumn(line) || 80,
+          message: synErr.message,
+          severity: monaco.MarkerSeverity.Error
+        });
+      } else if (runErr) {
+        const line = Math.min(Math.max(1, runErr.line || 1), model.getLineCount());
+        markers.push({
+          startLineNumber: line,
+          startColumn: 1,
+          endLineNumber: line,
+          endColumn: model.getLineMaxColumn(line) || 80,
+          message: `${runErr.type}: ${runErr.message}`,
+          severity: monaco.MarkerSeverity.Error
+        });
+      }
+      monaco.editor.setModelMarkers(model, 'live-errors', markers);
+    },
+    []
+  );
+
+  const runDebug = useCallback(
+    async (
+      sourceCode: string,
+      language: 'python' | 'javascript',
+      startPlayback = false,
+      silent = false,
+      expectedSeq?: number
+    ) => {
+      if (!silent) {
+        setIsDebugging(true);
+        setIsPlaying(false);
+        setSyntaxError(null);
+        setRuntimeError(null);
+      }
+
+      try {
+        const res = await fetch('/api/debug', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            language,
+            code: sourceCode,
+            timeoutMs: silent ? 900 : 3000
+          })
+        });
+        const data: DebugResponse = await res.json();
+
+        // Ignore stale trace if user kept typing
+        if (expectedSeq !== undefined && expectedSeq !== editSeqRef.current) {
+          return;
+        }
+
+        const nextSteps = data.steps || [];
+        const synErr = data.syntaxError || null;
+        const runErr = data.runtimeError || null;
+
+        setSteps(nextSteps);
+        setIsDirty(false);
+        setTruncated(Boolean(data.truncated));
+        setSyntaxError(synErr);
+        setRuntimeError(runErr);
+        setEditorMarkers(synErr, runErr);
+
+        if (runErr && nextSteps.length > 0) {
+          const errIdx = nextSteps.findIndex(s => s.error);
+          setStepIndex(errIdx >= 0 ? errIdx : 0);
+        } else if (!silent) {
+          setStepIndex(0);
+          if (startPlayback && data.success && nextSteps.length > 1) {
+            setIsPlaying(true);
+          }
+        } else {
+          setStepIndex(prev => Math.min(prev, Math.max(0, nextSteps.length - 1)));
+        }
+      } catch (err: any) {
+        if (expectedSeq !== undefined && expectedSeq !== editSeqRef.current) {
+          return;
+        }
+        if (!silent) {
+          setRuntimeError({
+            type: 'NetworkError',
+            message: err?.message || 'Failed to contact /api/debug',
+            line: 1
           });
         }
-        monacoRef.current.editor.setModelMarkers(model, 'visualizer-debug', markers);
+      } finally {
+        if (!silent) {
+          setIsDebugging(false);
+        }
       }
+    },
+    [setEditorMarkers]
+  );
 
-      if (data.runtimeError && (data.steps?.length || 0) > 0) {
-        // Jump straight to the failing line so user immediately sees where the error occurred
-        const errIdx = (data.steps || []).findIndex(s => s.error);
-        if (errIdx >= 0) setStepIndex(errIdx);
-      } else if (startPlayback && data.success && (data.steps?.length || 0) > 1) {
-        setIsPlaying(true);
-      }
-    } catch (err: any) {
-      setRuntimeError({
-        type: 'NetworkError',
-        message: err?.message || 'Failed to contact /api/debug',
-        line: 1
-      });
-    } finally {
-      setIsDebugging(false);
-    }
-  }, []);
-
-  // Auto-trace when language switches or initial mount
+  // Auto-trace when language switches or on initial mount
   useEffect(() => {
     const template = lang === 'python' ? TWO_SUM_PYTHON : TWO_SUM_JS;
+    editSeqRef.current += 1;
     setCode(template);
     setBreakpoints([]);
-    runDebug(template, lang, false);
-  }, [lang, runDebug]);
+    setIsDirty(false);
+    setEditorMarkers(null, null);
+    runDebug(template, lang, false, false, editSeqRef.current);
+  }, [lang, runDebug, setEditorMarkers]);
 
   // Playback timer with breakpoint pause support
   useEffect(() => {
@@ -128,14 +179,21 @@ export const TwoSumVisualizer: React.FC<TwoSumVisualizerProps> = ({ onImplement 
     return () => clearInterval(timer);
   }, [isPlaying, steps, breakpoints]);
 
-  // Real-time syntax check while user edits code
+  // Live error detection while writing: fast syntax check (180ms) -> silent runtime trace (500ms)
   useEffect(() => {
     if (!isDirty) return;
-    const timer = setTimeout(async () => {
-      if (!code.trim()) {
-        setSyntaxError(null);
-        return;
-      }
+    const seq = editSeqRef.current;
+
+    if (!code.trim()) {
+      setSyntaxError(null);
+      setRuntimeError(null);
+      setEditorMarkers(null, null);
+      return;
+    }
+
+    let runtimeTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const syntaxTimer = setTimeout(async () => {
       try {
         const res = await fetch('/api/check-syntax', {
           method: 'POST',
@@ -143,36 +201,32 @@ export const TwoSumVisualizer: React.FC<TwoSumVisualizerProps> = ({ onImplement 
           body: JSON.stringify({ language: lang, code })
         });
         const data = await res.json();
-        const model = editorRef.current?.getModel();
-        if (data.valid) {
-          setSyntaxError(null);
-          if (model && monacoRef.current) {
-            monacoRef.current.editor.setModelMarkers(model, 'visualizer-syntax', []);
-          }
-        } else if (data.errors?.length) {
+        if (seq !== editSeqRef.current) return;
+
+        if (!data.valid && data.errors?.length) {
           const first = data.errors[0];
           setSyntaxError(first);
-          if (model && monacoRef.current) {
-            monacoRef.current.editor.setModelMarkers(
-              model,
-              'visualizer-syntax',
-              data.errors.map((err: any) => ({
-                startLineNumber: Math.max(1, err.line || 1),
-                startColumn: Math.max(1, err.column || 1),
-                endLineNumber: Math.max(1, err.line || 1),
-                endColumn: model.getLineMaxColumn(Math.max(1, err.line || 1)) || 80,
-                message: err.message,
-                severity: monacoRef.current.MarkerSeverity.Error
-              }))
-            );
-          }
+          setRuntimeError(null);
+          setEditorMarkers(first, null);
+        } else {
+          setSyntaxError(null);
+          setEditorMarkers(null, null);
+          runtimeTimer = setTimeout(() => {
+            if (seq === editSeqRef.current) {
+              runDebug(code, lang, false, true, seq);
+            }
+          }, 320);
         }
       } catch {
-        // Ignore transient typing check failures
+        // Ignore transient errors while typing
       }
-    }, 280);
-    return () => clearTimeout(timer);
-  }, [code, lang, isDirty]);
+    }, 180);
+
+    return () => {
+      clearTimeout(syntaxTimer);
+      if (runtimeTimer) clearTimeout(runtimeTimer);
+    };
+  }, [code, lang, isDirty, runDebug, setEditorMarkers]);
 
   // Apply Monaco debugger decorations (active line, error line, breakpoints)
   useEffect(() => {
@@ -180,6 +234,9 @@ export const TwoSumVisualizer: React.FC<TwoSumVisualizerProps> = ({ onImplement 
     const monaco = monacoRef.current;
     const model = editor?.getModel();
     if (!editor || !monaco || !model) return;
+
+    // Also keep markers synced after editor mounts
+    setEditorMarkers(syntaxError, runtimeError);
 
     const decos: any[] = [];
     const maxLines = model.getLineCount();
@@ -199,8 +256,16 @@ export const TwoSumVisualizer: React.FC<TwoSumVisualizerProps> = ({ onImplement 
       }
     }
 
-    if (currentStep && currentStep.line >= 1 && currentStep.line <= maxLines && !isDirty) {
-      const isErrLine = Boolean(currentStep.error) || (errorLine === currentStep.line && Boolean(syntaxError || runtimeError));
+    if (syntaxError && syntaxError.line >= 1 && syntaxError.line <= maxLines) {
+      decos.push({
+        range: new monaco.Range(syntaxError.line, 1, syntaxError.line, 1),
+        options: {
+          isWholeLine: true,
+          className: 'debug-error-line'
+        }
+      });
+    } else if (currentStep && currentStep.line >= 1 && currentStep.line <= maxLines && !isDirty) {
+      const isErrLine = Boolean(currentStep.error) || (errorLine === currentStep.line && Boolean(runtimeError));
       decos.push({
         range: new monaco.Range(currentStep.line, 1, currentStep.line, 1),
         options: {
@@ -231,7 +296,7 @@ export const TwoSumVisualizer: React.FC<TwoSumVisualizerProps> = ({ onImplement 
         decorationsRef.current.set(decos);
       }
     }
-  }, [steps, stepIndex, breakpoints, syntaxError, runtimeError, isDirty, editorMounted]);
+  }, [steps, stepIndex, breakpoints, syntaxError, runtimeError, isDirty, editorMounted, setEditorMarkers]);
 
   const handleEditorDidMount: OnMount = (editor, monaco) => {
     editorRef.current = editor;
@@ -298,12 +363,31 @@ export const TwoSumVisualizer: React.FC<TwoSumVisualizerProps> = ({ onImplement 
 
   const handleResetTemplate = () => {
     const template = lang === 'python' ? TWO_SUM_PYTHON : TWO_SUM_JS;
+    editSeqRef.current += 1;
     setCode(template);
     setIsDirty(false);
+    setSyntaxError(null);
+    setRuntimeError(null);
+    setEditorMarkers(null, null);
     runDebug(template, lang, false);
   };
 
   const totalSteps = Math.max(steps.length, 1);
+  const inlineError = syntaxError
+    ? {
+        label: 'SyntaxError',
+        line: syntaxError.line,
+        column: syntaxError.column,
+        message: syntaxError.message
+      }
+    : runtimeError
+    ? {
+        label: runtimeError.type,
+        line: runtimeError.line,
+        column: undefined,
+        message: runtimeError.message
+      }
+    : null;
 
   return (
     <section aria-labelledby="two-sum-heading" className="space-y-4">
@@ -313,7 +397,7 @@ export const TwoSumVisualizer: React.FC<TwoSumVisualizerProps> = ({ onImplement 
         </h2>
         <p className="font-editorial text-[15px] text-neutral-300 leading-relaxed">
           Write or edit code directly in the editor, click the gutter to set breakpoints, and debug line by line with
-          live variable, array, hash-map, and error inspection.
+          live variable, array, hash-map, and instant error detection as you type.
         </p>
       </div>
 
@@ -376,7 +460,7 @@ export const TwoSumVisualizer: React.FC<TwoSumVisualizerProps> = ({ onImplement 
               </div>
             </div>
 
-            {/* Inline Status / Syntax Strip */}
+            {/* Inline Status Strip */}
             <div className="flex items-center justify-between px-4 py-1.5 border-b border-neutral-900 bg-[#09090b] text-[11px] font-mono">
               <div className="flex items-center gap-3 text-neutral-500">
                 <span>Click line gutter to toggle breakpoint</span>
@@ -387,28 +471,19 @@ export const TwoSumVisualizer: React.FC<TwoSumVisualizerProps> = ({ onImplement 
                 )}
               </div>
 
-              {syntaxError ? (
+              {inlineError ? (
                 <button
                   type="button"
-                  onClick={() => handleJumpToLine(syntaxError.line)}
-                  className="inline-flex items-center gap-1 text-rose-400 hover:text-rose-300 truncate max-w-[260px]"
+                  onClick={() => handleJumpToLine(inlineError.line)}
+                  className="inline-flex items-center gap-1 text-rose-400 hover:text-rose-300 font-semibold shrink-0"
                 >
                   <AlertCircle className="w-3 h-3 shrink-0" />
-                  <span className="truncate">Line {syntaxError.line}: {syntaxError.message}</span>
+                  <span>{inlineError.label} @ Line {inlineError.line}</span>
                 </button>
               ) : isDirty ? (
-                <span className="text-amber-400">Edited — click Debug to trace</span>
-              ) : runtimeError ? (
-                <button
-                  type="button"
-                  onClick={() => handleJumpToLine(runtimeError.line)}
-                  className="inline-flex items-center gap-1 text-rose-400 hover:text-rose-300"
-                >
-                  <AlertCircle className="w-3 h-3 shrink-0" />
-                  <span>{runtimeError.type} @ L{runtimeError.line}</span>
-                </button>
+                <span className="text-amber-400">Checking live...</span>
               ) : (
-                <span className="text-emerald-400/90">Ready</span>
+                <span className="text-emerald-400/90">No errors</span>
               )}
             </div>
 
@@ -419,9 +494,11 @@ export const TwoSumVisualizer: React.FC<TwoSumVisualizerProps> = ({ onImplement 
                 language={lang}
                 value={code}
                 onChange={(val) => {
+                  editSeqRef.current += 1;
                   setCode(val ?? '');
                   setIsDirty(true);
                   setIsPlaying(false);
+                  setRuntimeError(null);
                 }}
                 onMount={handleEditorDidMount}
                 theme="polyglot-debugger"
@@ -442,6 +519,29 @@ export const TwoSumVisualizer: React.FC<TwoSumVisualizerProps> = ({ onImplement 
                 }}
               />
             </div>
+
+            {/* Full Live Error Strip directly beneath editor whenever code is wrong */}
+            {inlineError && (
+              <div className="px-4 py-2 border-t border-rose-500/40 bg-rose-950/35 flex items-start justify-between gap-3 text-xs font-mono">
+                <div className="flex items-start gap-2 text-rose-200 min-w-0">
+                  <XCircle className="w-3.5 h-3.5 text-rose-400 shrink-0 mt-0.5" />
+                  <span className="break-words">
+                    <strong className="text-rose-300">
+                      {inlineError.label} (Line {inlineError.line}
+                      {inlineError.column ? `:${inlineError.column}` : ''}):
+                    </strong>{' '}
+                    {inlineError.message}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => handleJumpToLine(inlineError.line)}
+                  className="px-2 py-0.5 rounded border border-rose-500/40 bg-rose-950/60 hover:bg-rose-900/60 text-[11px] text-rose-200 shrink-0 transition-colors"
+                >
+                  Line {inlineError.line}
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Right Pane: LIVE VISUALISER */}

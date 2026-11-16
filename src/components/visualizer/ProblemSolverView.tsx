@@ -63,11 +63,50 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
   const editorRef = useRef<any>(null);
   const monacoRef = useRef<any>(null);
   const decorationsRef = useRef<any>(null);
+  const editSeqRef = useRef<number>(0);
+
+  const setEditorMarkers = React.useCallback(
+    (
+      synErr: { line: number; column?: number; message: string } | null,
+      runErr: { type: string; message: string; line: number } | null
+    ) => {
+      const model = editorRef.current?.getModel();
+      const monaco = monacoRef.current;
+      if (!model || !monaco) return;
+
+      const markers: any[] = [];
+      if (synErr) {
+        const line = Math.min(Math.max(1, synErr.line || 1), model.getLineCount());
+        markers.push({
+          startLineNumber: line,
+          startColumn: Math.max(1, synErr.column || 1),
+          endLineNumber: line,
+          endColumn: model.getLineMaxColumn(line) || 80,
+          message: synErr.message,
+          severity: monaco.MarkerSeverity.Error
+        });
+      } else if (runErr) {
+        const line = Math.min(Math.max(1, runErr.line || 1), model.getLineCount());
+        markers.push({
+          startLineNumber: line,
+          startColumn: 1,
+          endLineNumber: line,
+          endColumn: model.getLineMaxColumn(line) || 80,
+          message: `${runErr.type}: ${runErr.message}`,
+          severity: monaco.MarkerSeverity.Error
+        });
+      }
+      monaco.editor.setModelMarkers(model, 'live-errors', markers);
+    },
+    []
+  );
 
   useEffect(() => {
+    editSeqRef.current += 1;
     setCode(getProblemCode(problem, lang));
     setResult(null);
     setSubmissionStatus('idle');
+    setSyntaxErrors([]);
     setDebugSteps([]);
     setDebugStepIndex(0);
     setDebugRuntimeError(null);
@@ -75,7 +114,8 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
     setDebugDirty(false);
     setIsPlayingDebug(false);
     setBreakpoints([]);
-  }, [problem, lang]);
+    setEditorMarkers(null, null);
+  }, [problem, lang, setEditorMarkers]);
 
   const jumpToLine = (line: number) => {
     const editor = editorRef.current;
@@ -85,70 +125,73 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
     editor.focus();
   };
 
-  const runDebugTrace = async (sourceCode = code, startPlayback = false) => {
-    setLeftTab('visualiser');
-    setVisualiserMode('trace');
-    setIsDebugging(true);
-    setIsPlayingDebug(false);
-    setDebugRuntimeError(null);
-    setDebugSyntaxError(null);
-    try {
-      const res = await fetch('/api/debug', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ language: lang, code: sourceCode, timeoutMs: 3000 })
-      });
-      const data: DebugResponse = await res.json();
-      setDebugSteps(data.steps || []);
-      setDebugTruncated(Boolean(data.truncated));
-      setDebugSyntaxError(data.syntaxError || null);
-      setDebugRuntimeError(data.runtimeError || null);
-      setDebugDirty(false);
+  const runDebugTrace = React.useCallback(
+    async (sourceCode = code, startPlayback = false, silent = false, expectedSeq?: number) => {
+      if (!silent) {
+        setLeftTab('visualiser');
+        setVisualiserMode('trace');
+        setIsDebugging(true);
+        setIsPlayingDebug(false);
+        setDebugRuntimeError(null);
+        setDebugSyntaxError(null);
+      }
+      try {
+        const res = await fetch('/api/debug', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            language: lang,
+            code: sourceCode,
+            timeoutMs: silent ? 900 : 3000
+          })
+        });
+        const data: DebugResponse = await res.json();
+        if (expectedSeq !== undefined && expectedSeq !== editSeqRef.current) {
+          return;
+        }
 
-      const model = editorRef.current?.getModel();
-      if (model && monacoRef.current) {
-        const markers: any[] = [];
-        if (data.syntaxError) {
-          markers.push({
-            startLineNumber: Math.max(1, data.syntaxError.line || 1),
-            startColumn: Math.max(1, data.syntaxError.column || 1),
-            endLineNumber: Math.max(1, data.syntaxError.line || 1),
-            endColumn: model.getLineMaxColumn(Math.max(1, data.syntaxError.line || 1)) || 80,
-            message: data.syntaxError.message,
-            severity: monacoRef.current.MarkerSeverity.Error
-          });
-        } else if (data.runtimeError) {
-          markers.push({
-            startLineNumber: Math.max(1, data.runtimeError.line || 1),
-            startColumn: 1,
-            endLineNumber: Math.max(1, data.runtimeError.line || 1),
-            endColumn: model.getLineMaxColumn(Math.max(1, data.runtimeError.line || 1)) || 80,
-            message: `${data.runtimeError.type}: ${data.runtimeError.message}`,
-            severity: monacoRef.current.MarkerSeverity.Error
+        const nextSteps = data.steps || [];
+        const synErr = data.syntaxError || null;
+        const runErr = data.runtimeError || null;
+
+        setDebugSteps(nextSteps);
+        setDebugTruncated(Boolean(data.truncated));
+        setDebugSyntaxError(synErr);
+        setDebugRuntimeError(runErr);
+        setSyntaxErrors(synErr ? [synErr] : []);
+        setDebugDirty(false);
+        setEditorMarkers(synErr, runErr);
+
+        if (runErr && nextSteps.length > 0) {
+          const errIdx = nextSteps.findIndex(s => s.error);
+          setDebugStepIndex(errIdx >= 0 ? errIdx : 0);
+        } else if (!silent) {
+          setDebugStepIndex(0);
+          if (startPlayback && data.success && nextSteps.length > 1) {
+            setIsPlayingDebug(true);
+          }
+        } else {
+          setDebugStepIndex(prev => Math.min(prev, Math.max(0, nextSteps.length - 1)));
+        }
+      } catch (err: any) {
+        if (expectedSeq !== undefined && expectedSeq !== editSeqRef.current) {
+          return;
+        }
+        if (!silent) {
+          setDebugRuntimeError({
+            type: 'NetworkError',
+            message: err?.message || 'Debug trace request failed',
+            line: 1
           });
         }
-        monacoRef.current.editor.setModelMarkers(model, 'solver-debug', markers);
-      }
-
-      if (data.runtimeError && (data.steps?.length || 0) > 0) {
-        const errIdx = (data.steps || []).findIndex(s => s.error);
-        setDebugStepIndex(errIdx >= 0 ? errIdx : 0);
-      } else {
-        setDebugStepIndex(0);
-        if (startPlayback && data.success && (data.steps?.length || 0) > 1) {
-          setIsPlayingDebug(true);
+      } finally {
+        if (!silent) {
+          setIsDebugging(false);
         }
       }
-    } catch (err: any) {
-      setDebugRuntimeError({
-        type: 'NetworkError',
-        message: err?.message || 'Debug trace request failed',
-        line: 1
-      });
-    } finally {
-      setIsDebugging(false);
-    }
-  };
+    },
+    [code, lang, setEditorMarkers]
+  );
 
   useEffect(() => {
     if (!isPlayingDebug || debugSteps.length === 0) return;
@@ -179,7 +222,9 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
     const decos: any[] = [];
     const maxLines = model.getLineCount();
     const currentStep = leftTab === 'visualiser' ? debugSteps[debugStepIndex] : undefined;
-    const errLine = debugSyntaxError?.line || syntaxErrors[0]?.line || currentStep?.error?.line || debugRuntimeError?.line || null;
+    const activeSynErr = debugSyntaxError || syntaxErrors[0] || null;
+    setEditorMarkers(activeSynErr, debugRuntimeError);
+    const errLine = activeSynErr?.line || currentStep?.error?.line || debugRuntimeError?.line || null;
 
     for (const bpLine of breakpoints) {
       if (bpLine >= 1 && bpLine <= maxLines) {
@@ -194,7 +239,15 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
       }
     }
 
-    if (currentStep && currentStep.line >= 1 && currentStep.line <= maxLines && !debugDirty) {
+    if (activeSynErr && activeSynErr.line >= 1 && activeSynErr.line <= maxLines) {
+      decos.push({
+        range: new monaco.Range(activeSynErr.line, 1, activeSynErr.line, 1),
+        options: {
+          isWholeLine: true,
+          className: 'debug-error-line'
+        }
+      });
+    } else if (currentStep && currentStep.line >= 1 && currentStep.line <= maxLines && !debugDirty) {
       const isErrLine = Boolean(currentStep.error) || errLine === currentStep.line;
       decos.push({
         range: new monaco.Range(currentStep.line, 1, currentStep.line, 1),
@@ -226,7 +279,7 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
         decorationsRef.current.set(decos);
       }
     }
-  }, [leftTab, debugSteps, debugStepIndex, breakpoints, syntaxErrors, debugSyntaxError, debugRuntimeError, debugDirty, editorMounted]);
+  }, [leftTab, debugSteps, debugStepIndex, breakpoints, syntaxErrors, debugSyntaxError, debugRuntimeError, debugDirty, editorMounted, setEditorMarkers]);
 
   const handleEditorDidMount: OnMount = (editor, monaco) => {
     editorRef.current = editor;
@@ -264,13 +317,21 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
     setEditorMounted(true);
   };
 
-  // Real-time syntax markers
+  // Real-time error checking while writing: fast syntax check (180ms) -> silent runtime check (+320ms)
   useEffect(() => {
-    const timer = setTimeout(async () => {
-      if (!code.trim()) {
-        setSyntaxErrors([]);
-        return;
-      }
+    const seq = editSeqRef.current;
+
+    if (!code.trim()) {
+      setSyntaxErrors([]);
+      setDebugSyntaxError(null);
+      setDebugRuntimeError(null);
+      setEditorMarkers(null, null);
+      return;
+    }
+
+    let runtimeTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const syntaxTimer = setTimeout(async () => {
       try {
         const res = await fetch('/api/check-syntax', {
           method: 'POST',
@@ -278,36 +339,36 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
           body: JSON.stringify({ language: lang, code })
         });
         const data = await res.json();
-        const model = editorRef.current?.getModel();
-        if (data.valid) {
-          setSyntaxErrors([]);
-          if (model && monacoRef.current) {
-            monacoRef.current.editor.setModelMarkers(model, 'solver-syntax', []);
-          }
-        } else {
+        if (seq !== editSeqRef.current) return;
+
+        if (!data.valid && data.errors?.length) {
           const errs = data.errors || [];
           setSyntaxErrors(errs);
-          if (model && monacoRef.current) {
-            monacoRef.current.editor.setModelMarkers(
-              model,
-              'solver-syntax',
-              errs.map((err: any) => ({
-                startLineNumber: Math.max(1, err.line || 1),
-                startColumn: Math.max(1, err.column || 1),
-                endLineNumber: Math.max(1, err.line || 1),
-                endColumn: model.getLineMaxColumn(Math.max(1, err.line || 1)) || 80,
-                message: err.message,
-                severity: monacoRef.current.MarkerSeverity.Error
-              }))
-            );
+          setDebugSyntaxError(errs[0]);
+          setDebugRuntimeError(null);
+          setEditorMarkers(errs[0], null);
+        } else {
+          setSyntaxErrors([]);
+          setDebugSyntaxError(null);
+          setEditorMarkers(null, null);
+          if (debugDirty) {
+            runtimeTimer = setTimeout(() => {
+              if (seq === editSeqRef.current) {
+                runDebugTrace(code, false, true, seq);
+              }
+            }, 320);
           }
         }
       } catch {
         // Ignore transient errors during typing
       }
-    }, 280);
-    return () => clearTimeout(timer);
-  }, [code, lang]);
+    }, 180);
+
+    return () => {
+      clearTimeout(syntaxTimer);
+      if (runtimeTimer) clearTimeout(runtimeTimer);
+    };
+  }, [code, lang, debugDirty, runDebugTrace, setEditorMarkers]);
 
   const executeCode = async (isSubmit: boolean) => {
     if (isRunning) return;
@@ -646,13 +707,35 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
                 </select>
               </div>
 
-              {syntaxErrors.length > 0 ? (
-                <span className="text-[11px] text-rose-400 font-mono">
-                  Syntax: Line {syntaxErrors[0].line} — {syntaxErrors[0].message}
-                </span>
-              ) : (
-                <span className="text-[11px] text-neutral-500 font-mono">Syntax valid</span>
-              )}
+              {(() => {
+                const liveErr = debugSyntaxError || syntaxErrors[0] || null;
+                if (liveErr) {
+                  return (
+                    <button
+                      type="button"
+                      onClick={() => jumpToLine(liveErr.line)}
+                      className="text-[11px] text-rose-400 hover:text-rose-300 font-mono font-semibold"
+                    >
+                      SyntaxError @ Line {liveErr.line}
+                    </button>
+                  );
+                }
+                if (debugRuntimeError) {
+                  return (
+                    <button
+                      type="button"
+                      onClick={() => jumpToLine(debugRuntimeError.line)}
+                      className="text-[11px] text-rose-400 hover:text-rose-300 font-mono font-semibold"
+                    >
+                      {debugRuntimeError.type} @ Line {debugRuntimeError.line}
+                    </button>
+                  );
+                }
+                if (debugDirty) {
+                  return <span className="text-[11px] text-amber-400 font-mono">Checking live...</span>;
+                }
+                return <span className="text-[11px] text-emerald-400/90 font-mono">No errors</span>;
+              })()}
             </div>
 
             <div className="flex-1 min-h-[280px]">
@@ -661,9 +744,11 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
                 language={lang}
                 value={code}
                 onChange={(val) => {
+                  editSeqRef.current += 1;
                   setCode(val || '');
                   setDebugDirty(true);
                   setIsPlayingDebug(false);
+                  setDebugRuntimeError(null);
                 }}
                 onMount={handleEditorDidMount}
                 theme="ntree-obsidian"
@@ -680,6 +765,35 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
                 }}
               />
             </div>
+
+            {(debugSyntaxError || syntaxErrors[0] || debugRuntimeError) && (() => {
+              const syn = debugSyntaxError || syntaxErrors[0] || null;
+              const errLabel = syn ? 'SyntaxError' : debugRuntimeError!.type;
+              const errLine = syn ? syn.line : debugRuntimeError!.line;
+              const errCol = syn ? syn.column : undefined;
+              const errMsg = syn ? syn.message : debugRuntimeError!.message;
+              return (
+                <div className="px-4 py-2 border-t border-rose-500/40 bg-rose-950/35 flex items-start justify-between gap-3 text-xs font-mono">
+                  <div className="flex items-start gap-2 text-rose-200 min-w-0">
+                    <XCircle className="w-3.5 h-3.5 text-rose-400 shrink-0 mt-0.5" />
+                    <span className="break-words">
+                      <strong className="text-rose-300">
+                        {errLabel} (Line {errLine}
+                        {errCol ? `:${errCol}` : ''}):
+                      </strong>{' '}
+                      {errMsg}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => jumpToLine(errLine)}
+                    className="px-2 py-0.5 rounded border border-rose-500/40 bg-rose-950/60 hover:bg-rose-900/60 text-[11px] text-rose-200 shrink-0 transition-colors"
+                  >
+                    Line {errLine}
+                  </button>
+                </div>
+              );
+            })()}
           </div>
 
           {/* Bottom Test Cases / Test Result Panel */}
