@@ -540,11 +540,28 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
 
           <div className="p-5 overflow-y-auto flex-1 space-y-5">
             <div>
-              <h1 className="text-xl font-bold text-white">{problem.title}</h1>
-              <div className="mt-1.5 flex items-center gap-2 text-xs">
-                <span className={problem.difficulty === 'easy' ? 'text-emerald-400 font-medium' : 'text-amber-400 font-medium'}>
+              <h1 className="text-xl font-bold text-white">
+                {problem.leetcodeNumber ? `${problem.leetcodeNumber}. ` : ''}
+                {problem.title}
+              </h1>
+              <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs">
+                <span
+                  className={
+                    problem.difficulty === 'easy'
+                      ? 'text-emerald-400 font-medium'
+                      : problem.difficulty === 'hard'
+                      ? 'text-rose-400 font-medium'
+                      : 'text-amber-400 font-medium'
+                  }
+                >
                   {problem.difficulty}
                 </span>
+                {problem.week && (
+                  <>
+                    <span className="text-neutral-600">·</span>
+                    <span className="text-neutral-400 font-mono">Week {problem.week}</span>
+                  </>
+                )}
                 <span className="text-neutral-600">·</span>
                 <span className="text-neutral-400">{problem.topics.join(', ')}</span>
               </div>

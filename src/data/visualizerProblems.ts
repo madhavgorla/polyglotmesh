@@ -1,4 +1,5 @@
 import { SupportedLanguage } from '../types';
+import { CURRICULUM_PROBLEMS, CURRICULUM_CATEGORIES } from './curriculumProblems';
 
 export interface TwoSumStep {
   step: number;
@@ -69,8 +70,11 @@ export interface ProblemExample {
 
 export interface AlgorithmProblem {
   id: string;
+  week?: number;
+  category?: string;
+  leetcodeNumber?: number;
   title: string;
-  difficulty: 'easy' | 'medium';
+  difficulty: 'easy' | 'medium' | 'hard';
   topics: string[];
   description: string;
   examples: ProblemExample[];
@@ -679,37 +683,17 @@ function buildIslandSteps(): IslandStep[] {
 
 export const ISLAND_STEPS: IslandStep[] = buildIslandSteps();
 
-export const ALL_TOPICS = [
-  'Array',
-  'Backtracking',
-  'BFS',
-  'Binary search',
-  'Binary search tree',
-  'Bit manipulation',
-  'DFS',
-  'Dynamic programming',
-  'Graph',
-  'Greedy',
-  'Hash table',
-  'Linked list',
-  'Prefix sum',
-  'Queue',
-  'Sliding window',
-  'Sorting',
-  'Stack',
-  'String',
-  'Topological sort',
-  'Tree',
-  'Trie',
-  'Two pointers'
-];
+export const ALL_TOPICS: string[] = [...CURRICULUM_CATEGORIES];
 
-export const ALGORITHM_PROBLEMS: AlgorithmProblem[] = [
+const FEATURED_PROBLEMS: AlgorithmProblem[] = [
   {
     id: 'two-sum',
+    week: 1,
+    category: 'Arrays & Hashing',
+    leetcodeNumber: 1,
     title: 'Two Sum',
     difficulty: 'easy',
-    topics: ['Array', 'Hash table'],
+    topics: ['Arrays & Hashing', 'Array', 'Hash table'],
     description:
       'Given an array of integers nums and an integer target, return the indexes of the two numbers that add up to target.',
     examples: [
@@ -729,7 +713,7 @@ export const ALGORITHM_PROBLEMS: AlgorithmProblem[] = [
     id: 'move-zeroes',
     title: 'Move Zeroes',
     difficulty: 'easy',
-    topics: ['Array', 'Two pointers'],
+    topics: ['Two Pointers', 'Array', 'Two pointers'],
     description:
       'Given an integer array nums, move all 0s to the end while preserving the relative order of the non-zero elements.',
     examples: [
@@ -765,7 +749,7 @@ console.log(JSON.stringify(moveZeroes([0, 1, 0, 3, 12])));`
     id: 'palindrome-linked-list',
     title: 'Palindrome Linked List',
     difficulty: 'medium',
-    topics: ['Linked list', 'Two pointers'],
+    topics: ['Linked List', 'Linked list', 'Two pointers'],
     description:
       'Given the head of a singly linked list, return true if the values read the same forwards and backwards.',
     examples: [
@@ -843,7 +827,7 @@ console.log("Palindrome:", isPalindrome(head));`
     id: 'local-minimum',
     title: 'Local Minimum',
     difficulty: 'medium',
-    topics: ['Array', 'Binary search'],
+    topics: ['Binary Search', 'Array', 'Binary search'],
     description:
       'Find any index i in an array such that nums[i] is smaller than its adjacent neighbors in O(log n) time.',
     examples: [
@@ -885,9 +869,12 @@ console.log(\`Local minimum index=\${idx}, value=\${arr[idx]}\`);`
   },
   {
     id: 'product-except-self',
+    week: 1,
+    category: 'Arrays & Hashing',
+    leetcodeNumber: 238,
     title: 'Product of Array Except Self',
     difficulty: 'medium',
-    topics: ['Array', 'Prefix sum'],
+    topics: ['Arrays & Hashing', 'Array', 'Prefix sum'],
     description:
       'Return an array answer such that answer[i] equals the product of all elements of nums except nums[i] without division.',
     examples: [
@@ -929,9 +916,12 @@ console.log(JSON.stringify(productExceptSelf([1, 2, 3, 4])));`
   },
   {
     id: 'container-with-most-water',
+    week: 1,
+    category: 'Two Pointers',
+    leetcodeNumber: 11,
     title: 'Container With Most Water',
     difficulty: 'medium',
-    topics: ['Array', 'Two pointers', 'Greedy'],
+    topics: ['Two Pointers', 'Array', 'Two pointers', 'Greedy'],
     description:
       'You are given an integer array lines, where each element is the height of a vertical line standing at that index. Two lines and the axis between them form a container. Find the two lines that form the largest container and return its area.',
     examples: [
@@ -973,9 +963,12 @@ console.log("Largest area:", maxArea([2, 9, 4, 1, 7, 3]));`
   },
   {
     id: 'merge-intervals',
+    week: 3,
+    category: 'Intervals',
+    leetcodeNumber: 56,
     title: 'Merge Intervals',
     difficulty: 'medium',
-    topics: ['Array', 'Sorting'],
+    topics: ['Intervals', 'Array', 'Sorting'],
     description:
       'Given an array of intervals where intervals[i] = [start, end], return a new array with overlapping intervals merged.',
     examples: [
@@ -1019,7 +1012,7 @@ console.log(JSON.stringify(merge([[2, 6], [15, 18], [1, 3], [8, 10]])));`
     id: 'largest-island',
     title: 'Largest Island',
     difficulty: 'medium',
-    topics: ['DFS', 'BFS', 'Graph', 'Array'],
+    topics: ['Graphs', 'DFS', 'BFS', 'Graph', 'Array'],
     description:
       'You are given an m x n matrix grid of 0s and 1s, where 1 is land and 0 is water. Land cells joined horizontally or vertically form an island. Return the number of land cells in the largest island, or 0 if there is no land.',
     examples: [
@@ -1085,7 +1078,7 @@ console.log("Largest island:", maxAreaOfIsland(grid));`
     id: 'lowest-common-ancestor',
     title: 'Lowest Common Ancestor',
     difficulty: 'medium',
-    topics: ['Tree', 'DFS', 'Two pointers'],
+    topics: ['Trees', 'Tree', 'DFS', 'Two pointers'],
     description:
       'Given two nodes p and q from a tree, return their lowest common ancestor. Each node has a reference to its parent node.',
     examples: [
@@ -1136,6 +1129,11 @@ const n6 = new Node(6, n5), n2 = new Node(2, n5);
 const n7 = new Node(7, n2), n4 = new Node(4, n2);
 console.log("LCA:", lowestCommonAncestor(n6, n4).val);`
   }
+];
+
+export const ALGORITHM_PROBLEMS: AlgorithmProblem[] = [
+  ...FEATURED_PROBLEMS,
+  ...CURRICULUM_PROBLEMS
 ];
 
 export function getProblemCode(problem: AlgorithmProblem, language: SupportedLanguage): string {

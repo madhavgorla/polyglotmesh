@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { PanelLeftClose, PanelLeftOpen, Layers, Grid2X2 } from 'lucide-react';
+import { PanelLeftClose, PanelLeftOpen, Layers, Grid2X2, Search } from 'lucide-react';
 import { ALGORITHM_PROBLEMS, ALL_TOPICS, AlgorithmProblem } from '../../data/visualizerProblems';
 
 interface ProblemsExplorerViewProps {
@@ -14,12 +14,40 @@ export const ProblemsExplorerView: React.FC<ProblemsExplorerViewProps> = ({
   solvedIds
 }) => {
   const [selectedTopic, setSelectedTopic] = useState<string>('All');
+  const [selectedWeek, setSelectedWeek] = useState<string>('all');
+  const [selectedDifficulty, setSelectedDifficulty] = useState<'all' | 'easy' | 'medium' | 'hard'>('all');
+  const [searchQuery, setSearchQuery] = useState<string>('');
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
   const filteredProblems = useMemo(() => {
-    if (selectedTopic === 'All') return ALGORITHM_PROBLEMS;
-    return ALGORITHM_PROBLEMS.filter(p => p.topics.includes(selectedTopic));
-  }, [selectedTopic]);
+    const q = searchQuery.trim().toLowerCase();
+    return ALGORITHM_PROBLEMS.filter(p => {
+      if (selectedTopic !== 'All' && !p.topics.includes(selectedTopic) && p.category !== selectedTopic) {
+        return false;
+      }
+      if (selectedWeek !== 'all' && String(p.week || '') !== selectedWeek) {
+        return false;
+      }
+      if (selectedDifficulty !== 'all' && p.difficulty !== selectedDifficulty) {
+        return false;
+      }
+      if (q) {
+        const numStr = p.leetcodeNumber ? String(p.leetcodeNumber) : '';
+        const matchTitle = p.title.toLowerCase().includes(q);
+        const matchNum = numStr.includes(q);
+        const matchCat = (p.category || '').toLowerCase().includes(q);
+        if (!matchTitle && !matchNum && !matchCat) return false;
+      }
+      return true;
+    });
+  }, [selectedTopic, selectedWeek, selectedDifficulty, searchQuery]);
+
+  const resetFilters = () => {
+    setSelectedTopic('All');
+    setSelectedWeek('all');
+    setSelectedDifficulty('all');
+    setSearchQuery('');
+  };
 
   return (
     <div className="min-h-screen bg-[#0a0a0a] text-neutral-100 flex">
@@ -53,7 +81,7 @@ export const ProblemsExplorerView: React.FC<ProblemsExplorerViewProps> = ({
           <nav className="p-2.5 space-y-1">
             <button
               type="button"
-              onClick={() => setSelectedTopic('All')}
+              onClick={resetFilters}
               className="w-full flex items-center gap-3 px-3 py-2 rounded-lg bg-neutral-800/80 text-white text-xs font-medium transition-colors"
             >
               <Grid2X2 className="w-4 h-4 text-neutral-200 shrink-0" />
@@ -93,18 +121,79 @@ export const ProblemsExplorerView: React.FC<ProblemsExplorerViewProps> = ({
         )}
       </aside>
 
-      {/* Main Content matching Photo 5 */}
+      {/* Main Content */}
       <main className="flex-1 min-w-0 px-6 sm:px-10 lg:px-14 py-8 max-w-[1160px]">
-        <div className="space-y-7">
-          <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-white">Problems</h1>
+        <div className="space-y-6">
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div className="flex items-baseline gap-3">
+              <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-white">Problems</h1>
+              <span className="text-xs font-mono text-neutral-500 tabular-nums">
+                {filteredProblems.length} / {ALGORITHM_PROBLEMS.length}
+              </span>
+            </div>
 
-          {/* TOPICS Filter Pills (Interactive Filter Controls) */}
+            {/* Search + Week + Difficulty Filter Controls */}
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="relative">
+                <Search className="w-3.5 h-3.5 text-neutral-500 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search title or #..."
+                  aria-label="Search problems"
+                  className="bg-[#111113] border border-neutral-800 rounded-lg pl-8 pr-3 py-1.5 text-xs text-neutral-100 placeholder-neutral-500 focus:outline-none focus:border-emerald-500 w-44 sm:w-52"
+                />
+              </div>
+
+              <select
+                aria-label="Filter by Week"
+                value={selectedWeek}
+                onChange={(e) => setSelectedWeek(e.target.value)}
+                className="bg-[#111113] border border-neutral-800 rounded-lg px-2.5 py-1.5 text-xs text-neutral-200 focus:outline-none focus:border-emerald-500 cursor-pointer"
+              >
+                <option value="all">All Weeks</option>
+                {Array.from({ length: 12 }, (_, idx) => idx + 1).map(w => (
+                  <option key={w} value={String(w)}>
+                    Week {w}
+                  </option>
+                ))}
+              </select>
+
+              <select
+                aria-label="Filter by Difficulty"
+                value={selectedDifficulty}
+                onChange={(e) => setSelectedDifficulty(e.target.value as 'all' | 'easy' | 'medium' | 'hard')}
+                className="bg-[#111113] border border-neutral-800 rounded-lg px-2.5 py-1.5 text-xs text-neutral-200 focus:outline-none focus:border-emerald-500 cursor-pointer"
+              >
+                <option value="all">All Levels</option>
+                <option value="easy">Easy</option>
+                <option value="medium">Medium</option>
+                <option value="hard">Hard</option>
+              </select>
+            </div>
+          </div>
+
+          {/* TOPICS Filter Pills */}
           <div className="space-y-3">
-            <div className="text-[11px] font-semibold tracking-wider text-neutral-400 uppercase">Topics</div>
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-semibold tracking-wider text-neutral-400 uppercase">Topics</span>
+              {(selectedTopic !== 'All' || selectedWeek !== 'all' || selectedDifficulty !== 'all' || searchQuery) && (
+                <button
+                  type="button"
+                  onClick={resetFilters}
+                  className="text-[11px] font-mono text-emerald-400 hover:text-emerald-300 transition-colors"
+                >
+                  Clear filters
+                </button>
+              )}
+            </div>
             <div className="flex flex-wrap gap-2">
               {ALL_TOPICS.map(topic => {
                 const active = selectedTopic === topic;
-                const count = ALGORITHM_PROBLEMS.filter(p => p.topics.includes(topic)).length;
+                const count = ALGORITHM_PROBLEMS.filter(
+                  p => p.topics.includes(topic) || p.category === topic
+                ).length;
                 return (
                   <button
                     key={topic}
@@ -125,19 +214,19 @@ export const ProblemsExplorerView: React.FC<ProblemsExplorerViewProps> = ({
             </div>
           </div>
 
-          {/* Alternating Zebra Problem Rows matching Photo 5 */}
-          <div className="space-y-0.5 pt-2">
+          {/* Alternating Zebra Problem Rows */}
+          <div className="space-y-0.5 pt-1">
             {filteredProblems.length === 0 ? (
               <div className="rounded-lg border border-neutral-800 bg-[#141416] p-8 text-center space-y-3">
                 <p className="text-sm text-neutral-300">
-                  No interactive problems tagged with <strong className="text-white">{selectedTopic}</strong> yet.
+                  No problems match the current filter selection.
                 </p>
                 <button
                   type="button"
-                  onClick={() => setSelectedTopic('All')}
+                  onClick={resetFilters}
                   className="px-4 py-2 text-xs font-medium rounded-lg border border-neutral-700 text-neutral-200 hover:bg-neutral-800 transition-colors"
                 >
-                  Show all problems
+                  Reset all filters
                 </button>
               </div>
             ) : (
@@ -159,16 +248,32 @@ export const ProblemsExplorerView: React.FC<ProblemsExplorerViewProps> = ({
                         }`}
                         aria-hidden="true"
                       />
+                      {problem.leetcodeNumber && (
+                        <span className="text-xs font-mono text-neutral-500 tabular-nums w-10 shrink-0">
+                          #{problem.leetcodeNumber}
+                        </span>
+                      )}
                       <span className="text-sm font-medium text-neutral-100 truncate">{problem.title}</span>
                     </div>
 
-                    <span
-                      className={`text-xs font-medium shrink-0 ${
-                        problem.difficulty === 'easy' ? 'text-emerald-400' : 'text-amber-400'
-                      }`}
-                    >
-                      {problem.difficulty}
-                    </span>
+                    <div className="flex items-center gap-4 shrink-0">
+                      {problem.week && (
+                        <span className="hidden sm:inline text-[11px] font-mono text-neutral-500">
+                          W{problem.week} · {problem.category || problem.topics[0]}
+                        </span>
+                      )}
+                      <span
+                        className={`text-xs font-medium w-14 text-right ${
+                          problem.difficulty === 'easy'
+                            ? 'text-emerald-400'
+                            : problem.difficulty === 'hard'
+                            ? 'text-rose-400'
+                            : 'text-amber-400'
+                        }`}
+                      >
+                        {problem.difficulty}
+                      </span>
+                    </div>
                   </button>
                 );
               })
