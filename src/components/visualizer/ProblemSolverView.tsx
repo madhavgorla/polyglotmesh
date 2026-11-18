@@ -12,8 +12,7 @@ import {
   Bug
 } from 'lucide-react';
 import {
-  AlgorithmProblem,
-  getProblemCode
+  AlgorithmProblem
 } from '../../data/visualizerProblems';
 import {
   PalindromeLinkedListVisual,
@@ -41,8 +40,8 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
   onSolved
 }) => {
   const [lang, setLang] = useState<'python' | 'javascript'>(initialLanguage);
-  const [code, setCode] = useState<string>(getProblemCode(problem, initialLanguage));
-  const [leftTab, setLeftTab] = useState<'description' | 'visualiser' | 'solutions'>('description');
+  const [code, setCode] = useState<string>('');
+  const [leftTab, setLeftTab] = useState<'description' | 'visualiser'>('description');
   const [bottomTab, setBottomTab] = useState<'cases' | 'result'>('cases');
   const [isRunning, setIsRunning] = useState(false);
   const [result, setResult] = useState<ExecutionResponse | null>(null);
@@ -103,7 +102,7 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
 
   useEffect(() => {
     editSeqRef.current += 1;
-    setCode(getProblemCode(problem, lang));
+    setCode('');
     setResult(null);
     setSubmissionStatus('idle');
     setSyntaxErrors([]);
@@ -525,17 +524,6 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
             >
               Visualiser
             </button>
-            <button
-              type="button"
-              onClick={() => setLeftTab('solutions')}
-              className={`py-2.5 border-b-2 transition-colors ${
-                leftTab === 'solutions'
-                  ? 'border-white text-white'
-                  : 'border-transparent text-neutral-500 hover:text-neutral-300'
-              }`}
-            >
-              Solutions
-            </button>
           </div>
 
           <div className="p-5 overflow-y-auto flex-1 space-y-5">
@@ -685,25 +673,6 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
                 )}
               </div>
             )}
-
-            {leftTab === 'solutions' && (
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs text-neutral-400">Reference {lang === 'python' ? 'Python' : 'JavaScript'} solution</span>
-                  <button
-                    type="button"
-                    onClick={() => setCode(getProblemCode(problem, lang))}
-                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded border border-neutral-700 text-xs text-neutral-200 hover:bg-neutral-800 transition-colors"
-                  >
-                    <RotateCcw className="w-3 h-3" />
-                    <span>Restore template</span>
-                  </button>
-                </div>
-                <pre className="p-4 rounded-lg border border-neutral-800 bg-[#09090b] font-mono text-xs text-neutral-200 overflow-x-auto leading-6">
-                  {getProblemCode(problem, lang)}
-                </pre>
-              </div>
-            )}
           </div>
         </section>
 
@@ -722,6 +691,25 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
                   <option value="python">Python</option>
                   <option value="javascript">JavaScript</option>
                 </select>
+                {code.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      editSeqRef.current += 1;
+                      setCode('');
+                      setDebugDirty(false);
+                      setSyntaxErrors([]);
+                      setDebugSyntaxError(null);
+                      setDebugRuntimeError(null);
+                      setEditorMarkers(null, null);
+                    }}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-neutral-800 text-[11px] text-neutral-400 hover:text-white hover:bg-neutral-900 transition-colors"
+                    title="Clear code editor"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    <span>Clear</span>
+                  </button>
+                )}
               </div>
 
               {(() => {
@@ -750,6 +738,13 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
                 }
                 if (debugDirty) {
                   return <span className="text-[11px] text-amber-400 font-mono">Checking live...</span>;
+                }
+                if (!code.trim()) {
+                  return (
+                    <span className="text-[11px] text-neutral-500 font-mono">
+                      Write your {lang === 'python' ? 'Python' : 'JavaScript'} solution
+                    </span>
+                  );
                 }
                 return <span className="text-[11px] text-emerald-400/90 font-mono">No errors</span>;
               })()}
