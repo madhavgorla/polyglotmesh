@@ -12,3 +12,6 @@ target/
 .classpath
 .settings/
 .data/
+.idea/
+*.iml
+package-lock.json

@@ -97,6 +97,99 @@ java -jar target\polyglotmesh-backend-1.0.0-SNAPSHOT.jar
 
 ---
 
+### POST `/api/check-syntax`
+Fast, **parse-only** syntax validation. Performs the real GraalVM parse inside the sandbox but
+**does not execute** the program and does **not** block a concurrency slot, so it is safe to call
+on every editor keystroke (debounced ~180 ms in the front-end).
+
+**Sample Request**:
+```json
+{
+  "language": "python",
+  "code": "def add(a, b):\n    return a +\n"
+}
+```
+
+**Valid syntax (HTTP 200)**:
+```json
+{
+  "valid": true,
+  "errors": []
+}
+```
+
+**Invalid syntax (HTTP 200)**:
+```json
+{
+  "valid": false,
+  "errors": [
+    {
+      "line": 1,
+      "column": 19,
+      "message": "Syntax Error: ...",
+      "severity": "error",
+      "text": "return a +"
+    }
+  ]
+}
+```
+
+Security-policy violations and unsupported/unavailable runtimes are also reported here
+(message prefixed with `[SecurityPolicyViolation]` / `Runtime Unavailable`).
+
+---
+
+### POST `/api/debug`
+Sandboxed step-debug and error reporting for the visualiser editors. Supports `python` and
+`javascript`. Honors the execution timeout (`timeoutMs`, clamped to the configured max) and the
+concurrency semaphore. A syntax error, runtime error or security violation is returned with a
+single `step[].event = "exception"`.
+
+**Sample Request**:
+```json
+{
+  "language": "python",
+  "code": "print('before')\nraise ValueError('boom')",
+  "timeoutMs": 3000
+}
+```
+
+**Success (HTTP 200)**:
+```json
+{
+  "success": true,
+  "language": "python",
+  "steps": [
+    { "step": 1, "line": 1, "event": "return", "functionName": "<module>",
+      "locals": {}, "stack": [], "stdout": "before", "caption": "Program completed" }
+  ],
+  "finalOutput": "...",
+  "executionTimeMs": 14,
+  "truncated": false
+}
+```
+
+**Runtime error (HTTP 200)**:
+```json
+{
+  "success": false,
+  "language": "python",
+  "steps": [
+    { "step": 1, "line": 2, "event": "exception", "functionName": "<module>",
+      "locals": {}, "stack": [], "stdout": "", "error": {
+        "type": "ValueError", "message": "ValueError('boom')", "line": 2 }, 
+      "caption": "ValueError at line 2: ValueError('boom')" }
+  ],
+  "runtimeError": { "type": "ValueError", "message": "ValueError('boom')", "line": 2 },
+  "finalOutput": "",
+  "executionTimeMs": 12
+}
+```
+
+**Syntax error (HTTP 200)** — `syntaxError` is populated instead of `runtimeError`.
+
+---
+
 ## 4. Security Sandbox Architecture
 
 | Security Dimension | GraalVM Sandbox Policy | Enforcement Mechanism |
