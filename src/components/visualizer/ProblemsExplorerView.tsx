@@ -1,17 +1,24 @@
 import React, { useState, useMemo } from 'react';
-import { PanelLeftClose, PanelLeftOpen, Layers, Grid2X2, Search } from 'lucide-react';
+import { PanelLeftClose, PanelLeftOpen, Layers, Grid2X2, Search, Check } from 'lucide-react';
 import { ALGORITHM_PROBLEMS, ALL_TOPICS, AlgorithmProblem } from '../../data/visualizerProblems';
+import { UserProgressDashboard } from './UserProgressDashboard';
 
 interface ProblemsExplorerViewProps {
   onSelectProblem: (problem: AlgorithmProblem) => void;
   onGoHome: () => void;
   solvedIds: string[];
+  solveTimestamps?: Record<string, string>;
+  onToggleSolved?: (problemId: string) => void;
+  onResetProgress?: () => void;
 }
 
 export const ProblemsExplorerView: React.FC<ProblemsExplorerViewProps> = ({
   onSelectProblem,
   onGoHome,
-  solvedIds
+  solvedIds,
+  solveTimestamps = {},
+  onToggleSolved,
+  onResetProgress,
 }) => {
   const [selectedTopic, setSelectedTopic] = useState<string>('All');
   const [selectedWeek, setSelectedWeek] = useState<string>('all');
@@ -174,6 +181,17 @@ export const ProblemsExplorerView: React.FC<ProblemsExplorerViewProps> = ({
             </div>
           </div>
 
+          {/* User Progress Summary Dashboard */}
+          <UserProgressDashboard
+            problems={ALGORITHM_PROBLEMS}
+            solvedIds={solvedIds}
+            solveTimestamps={solveTimestamps}
+            selectedDifficulty={selectedDifficulty}
+            onFilterDifficulty={setSelectedDifficulty}
+            onSelectProblem={onSelectProblem}
+            onResetProgress={onResetProgress}
+          />
+
           {/* TOPICS Filter Pills */}
           <div className="space-y-3">
             <div className="flex items-center justify-between">
@@ -233,48 +251,67 @@ export const ProblemsExplorerView: React.FC<ProblemsExplorerViewProps> = ({
               filteredProblems.map((problem, idx) => {
                 const isSolved = solvedIds.includes(problem.id);
                 return (
-                  <button
+                  <div
                     key={problem.id}
-                    type="button"
-                    onClick={() => onSelectProblem(problem)}
-                    className={`w-full text-left px-4 py-3.5 rounded-lg flex items-center justify-between gap-4 transition-colors hover:bg-neutral-800/70 ${
+                    className={`w-full px-4 py-3 rounded-lg flex items-center gap-3.5 transition-colors hover:bg-neutral-800/70 ${
                       idx % 2 === 1 ? 'bg-[#141416]' : 'bg-transparent'
                     }`}
                   >
-                    <div className="flex items-center gap-3.5 min-w-0">
-                      <span
-                        className={`w-3.5 h-3.5 rounded-full border-2 shrink-0 ${
-                          isSolved ? 'border-emerald-400 bg-emerald-400/25' : 'border-emerald-400'
-                        }`}
-                        aria-hidden="true"
-                      />
-                      {problem.leetcodeNumber && (
-                        <span className="text-xs font-mono text-neutral-500 tabular-nums w-10 shrink-0">
-                          #{problem.leetcodeNumber}
-                        </span>
-                      )}
-                      <span className="text-sm font-medium text-neutral-100 truncate">{problem.title}</span>
-                    </div>
+                    <button
+                      type="button"
+                      onClick={() => onToggleSolved?.(problem.id)}
+                      aria-label={
+                        isSolved
+                          ? `Mark ${problem.title} as unsolved`
+                          : `Mark ${problem.title} as solved`
+                      }
+                      aria-pressed={isSolved}
+                      title={isSolved ? 'Solved (click to unmark)' : 'Mark as solved'}
+                      className={`w-4 h-4 rounded-full border-2 shrink-0 flex items-center justify-center transition-colors ${
+                        isSolved
+                          ? 'border-emerald-400 bg-emerald-400 text-neutral-950'
+                          : 'border-emerald-400/70 hover:border-emerald-300 bg-transparent'
+                      }`}
+                    >
+                      {isSolved && <Check className="w-2.5 h-2.5 stroke-[3]" />}
+                    </button>
 
-                    <div className="flex items-center gap-4 shrink-0">
-                      {problem.week && (
-                        <span className="hidden sm:inline text-[11px] font-mono text-neutral-500">
-                          W{problem.week} · {problem.category || problem.topics[0]}
+                    <button
+                      type="button"
+                      onClick={() => onSelectProblem(problem)}
+                      className="flex-1 min-w-0 flex items-center justify-between gap-4 text-left py-0.5"
+                    >
+                      <div className="flex items-center gap-3.5 min-w-0">
+                        {problem.leetcodeNumber && (
+                          <span className="text-xs font-mono text-neutral-500 tabular-nums w-10 shrink-0">
+                            #{problem.leetcodeNumber}
+                          </span>
+                        )}
+                        <span className="text-sm font-medium text-neutral-100 truncate">
+                          {problem.title}
                         </span>
-                      )}
-                      <span
-                        className={`text-xs font-medium w-14 text-right ${
-                          problem.difficulty === 'easy'
-                            ? 'text-emerald-400'
-                            : problem.difficulty === 'hard'
-                            ? 'text-rose-400'
-                            : 'text-amber-400'
-                        }`}
-                      >
-                        {problem.difficulty}
-                      </span>
-                    </div>
-                  </button>
+                      </div>
+
+                      <div className="flex items-center gap-4 shrink-0">
+                        {problem.week && (
+                          <span className="hidden sm:inline text-[11px] font-mono text-neutral-500">
+                            W{problem.week} · {problem.category || problem.topics[0]}
+                          </span>
+                        )}
+                        <span
+                          className={`text-xs font-medium w-14 text-right ${
+                            problem.difficulty === 'easy'
+                              ? 'text-emerald-400'
+                              : problem.difficulty === 'hard'
+                              ? 'text-rose-400'
+                              : 'text-amber-400'
+                          }`}
+                        >
+                          {problem.difficulty}
+                        </span>
+                      </div>
+                    </button>
+                  </div>
                 );
               })
             )}

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { VisualiserWorkspaceView } from './components/VisualiserWorkspaceView';
 import { ProblemsExplorerView } from './components/visualizer/ProblemsExplorerView';
 import { ProblemSolverView } from './components/visualizer/ProblemSolverView';
@@ -6,11 +6,86 @@ import { ALGORITHM_PROBLEMS, AlgorithmProblem } from './data/visualizerProblems'
 
 type AppMode = 'home' | 'problems' | 'solve';
 
+const SOLVED_IDS_STORAGE_KEY = 'polyglotmesh_solved_ids_v1';
+const SOLVE_TIMESTAMPS_STORAGE_KEY = 'polyglotmesh_solve_timestamps_v1';
+
+function readStoredSolvedIds(): string[] {
+  try {
+    const raw = window.localStorage.getItem(SOLVED_IDS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function readStoredTimestamps(): Record<string, string> {
+  try {
+    const raw = window.localStorage.getItem(SOLVE_TIMESTAMPS_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      if (typeof v === 'string') out[k] = v;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
 export default function App() {
   const [appMode, setAppMode] = useState<AppMode>('home');
   const [selectedProblem, setSelectedProblem] = useState<AlgorithmProblem>(ALGORITHM_PROBLEMS[0]);
   const [solverLang, setSolverLang] = useState<'python' | 'javascript'>('python');
-  const [solvedIds, setSolvedIds] = useState<string[]>([]);
+  const [solvedIds, setSolvedIds] = useState<string[]>(readStoredSolvedIds);
+  const [solveTimestamps, setSolveTimestamps] = useState<Record<string, string>>(readStoredTimestamps);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(SOLVED_IDS_STORAGE_KEY, JSON.stringify(solvedIds));
+    } catch {
+      // Ignore storage quota errors
+    }
+  }, [solvedIds]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(SOLVE_TIMESTAMPS_STORAGE_KEY, JSON.stringify(solveTimestamps));
+    } catch {
+      // Ignore storage quota errors
+    }
+  }, [solveTimestamps]);
+
+  const handleMarkSolved = (id: string) => {
+    setSolvedIds((prev) => (prev.includes(id) ? prev : [...prev, id]));
+    setSolveTimestamps((prev) => (prev[id] ? prev : { ...prev, [id]: new Date().toISOString() }));
+  };
+
+  const handleToggleSolved = (id: string) => {
+    setSolvedIds((prev) => {
+      const exists = prev.includes(id);
+      if (exists) {
+        return prev.filter((item) => item !== id);
+      }
+      return [...prev, id];
+    });
+    setSolveTimestamps((prev) => {
+      if (prev[id]) {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      }
+      return { ...prev, [id]: new Date().toISOString() };
+    });
+  };
+
+  const handleResetProgress = () => {
+    setSolvedIds([]);
+    setSolveTimestamps({});
+  };
 
   const openProblemInSolver = (
     problem: AlgorithmProblem,
@@ -32,6 +107,9 @@ export default function App() {
     return (
       <ProblemsExplorerView
         solvedIds={solvedIds}
+        solveTimestamps={solveTimestamps}
+        onToggleSolved={handleToggleSolved}
+        onResetProgress={handleResetProgress}
         onSelectProblem={(problem) => openProblemInSolver(problem, 'python')}
         onGoHome={() => {
           setAppMode('home');
@@ -52,9 +130,7 @@ export default function App() {
           setAppMode('home');
           window.scrollTo({ top: 0, behavior: 'instant' });
         }}
-        onSolved={(id) =>
-          setSolvedIds(prev => (prev.includes(id) ? prev : [...prev, id]))
-        }
+        onSolved={handleMarkSolved}
       />
     );
   }
