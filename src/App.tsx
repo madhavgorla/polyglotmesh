@@ -125,12 +125,14 @@ export default function App() {
       <ProblemSolverView
         problem={selectedProblem}
         initialLanguage={solverLang}
+        isSolved={solvedIds.includes(selectedProblem.id)}
         onBackToProblems={() => setAppMode('problems')}
         onGoHome={() => {
           setAppMode('home');
           window.scrollTo({ top: 0, behavior: 'instant' });
         }}
         onSolved={handleMarkSolved}
+        onToggleSolved={handleToggleSolved}
       />
     );
   }

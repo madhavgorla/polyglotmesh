@@ -22,25 +22,32 @@ import {
 } from './AlgorithmIllustrations';
 import { LiveMemoryVisualiser } from './LiveMemoryVisualiser';
 import { PlaybackBar } from './PlaybackBar';
+import { ConfettiBurst } from './ConfettiBurst';
 import { DebugResponse, DebugStep, ExecutionResponse, SupportedLanguage } from '../../types';
 
 interface ProblemSolverViewProps {
   problem: AlgorithmProblem;
   initialLanguage?: 'python' | 'javascript';
+  isSolved?: boolean;
   onBackToProblems: () => void;
   onGoHome: () => void;
   onSolved: (problemId: string) => void;
+  onToggleSolved?: (problemId: string) => void;
 }
 
 export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
   problem,
   initialLanguage = 'python',
+  isSolved,
   onBackToProblems,
   onGoHome,
-  onSolved
+  onSolved,
+  onToggleSolved
 }) => {
   const [lang, setLang] = useState<'python' | 'javascript'>(initialLanguage);
   const [code, setCode] = useState<string>('');
+  const [localSolved, setLocalSolved] = useState<boolean>(false);
+  const [confettiTrigger, setConfettiTrigger] = useState<number>(0);
   const [leftTab, setLeftTab] = useState<'description' | 'visualiser'>('description');
   const [bottomTab, setBottomTab] = useState<'cases' | 'result'>('cases');
   const [isRunning, setIsRunning] = useState(false);
@@ -103,6 +110,8 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
   useEffect(() => {
     editSeqRef.current += 1;
     setCode('');
+    setLocalSolved(false);
+    setConfettiTrigger(0);
     setResult(null);
     setSubmissionStatus('idle');
     setSyntaxErrors([]);
@@ -115,6 +124,25 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
     setBreakpoints([]);
     setEditorMarkers(null, null);
   }, [problem, lang, setEditorMarkers]);
+
+  const effectiveSolved = isSolved ?? localSolved;
+
+  const handleMarkSolvedToggle = () => {
+    if (!effectiveSolved) {
+      setLocalSolved(true);
+      if (onToggleSolved) {
+        onToggleSolved(problem.id);
+      } else {
+        onSolved(problem.id);
+      }
+      setConfettiTrigger(prev => prev + 1);
+    } else {
+      setLocalSolved(false);
+      if (onToggleSolved) {
+        onToggleSolved(problem.id);
+      }
+    }
+  };
 
   const jumpToLine = (line: number) => {
     const editor = editorRef.current;
@@ -387,7 +415,9 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
         const expectedLower = problem.expectedPrintSubstring.toLowerCase();
         if (data.success && outputLower.includes(expectedLower)) {
           setSubmissionStatus('passed');
+          setLocalSolved(true);
           onSolved(problem.id);
+          setConfettiTrigger(prev => prev + 1);
         } else {
           setSubmissionStatus('failed');
         }
@@ -433,6 +463,8 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
 
   return (
     <div className="min-h-screen bg-[#0a0a0a] text-neutral-100 flex flex-col">
+      <ConfettiBurst triggerKey={confettiTrigger} resetKey={problem.id} />
+
       {/* Top Bar matching the window inside Photo 4 */}
       <header className="h-12 px-4 border-b border-neutral-800 bg-[#0d0d10] flex items-center justify-between gap-4">
         <div className="flex items-center gap-4 min-w-0">
@@ -454,13 +486,13 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
           </button>
         </div>
 
-        {/* Center/Right Action Buttons (Visualise / Debug, Run, Submit) */}
+        {/* Center/Right Action Buttons (Visualise / Debug, Mark Solved, Run, Submit) */}
         <div className="flex items-center gap-2 shrink-0">
           <button
             type="button"
             onClick={() => runDebugTrace(code, false)}
             disabled={isDebugging}
-            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium border transition-colors ${
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium border transition-colors whitespace-nowrap shrink-0 ${
               leftTab === 'visualiser'
                 ? 'bg-amber-500/20 border-amber-400 text-amber-200'
                 : 'bg-amber-950/30 border-amber-700/50 text-amber-300 hover:bg-amber-900/40'
@@ -472,9 +504,25 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
 
           <button
             type="button"
+            onClick={handleMarkSolvedToggle}
+            aria-pressed={effectiveSolved}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium border transition-colors whitespace-nowrap shrink-0 ${
+              effectiveSolved
+                ? 'bg-emerald-500/15 border-emerald-500/50 text-emerald-300 hover:bg-emerald-500/25'
+                : 'bg-neutral-900 hover:bg-neutral-800 border-neutral-700 text-neutral-200'
+            }`}
+          >
+            <CheckCircle2
+              className={`w-3.5 h-3.5 ${effectiveSolved ? 'text-emerald-400' : 'text-neutral-400'}`}
+            />
+            <span>{effectiveSolved ? 'Solved' : 'Mark solved'}</span>
+          </button>
+
+          <button
+            type="button"
             onClick={() => executeCode(false)}
             disabled={isRunning}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-neutral-100 transition-colors disabled:opacity-50"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-neutral-100 transition-colors disabled:opacity-50 whitespace-nowrap shrink-0"
           >
             {isRunning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
             <span>Run</span>
@@ -484,7 +532,7 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
             type="button"
             onClick={() => executeCode(true)}
             disabled={isRunning}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold bg-emerald-400 hover:bg-emerald-300 text-neutral-950 transition-colors disabled:opacity-50"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold bg-emerald-400 hover:bg-emerald-300 text-neutral-950 transition-colors disabled:opacity-50 whitespace-nowrap shrink-0"
           >
             <Upload className="w-3.5 h-3.5" />
             <span>Submit</span>
