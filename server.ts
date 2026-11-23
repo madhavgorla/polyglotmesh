@@ -1479,6 +1479,629 @@ app.post('/api/execute', async (req: Request, res: Response) => {
   }
 });
 
+// LeetCode-Style Multi-Testcase Judge Endpoint: POST /api/judge
+app.post('/api/judge', async (req: Request, res: Response) => {
+  const startTime = Date.now();
+  const {
+    language,
+    code,
+    methodName = 'solve',
+    unorderedReturn = false,
+    expectedPrintSubstring = '',
+    testCases = [],
+    timeoutMs = 3000
+  } = req.body || {};
+
+  let normalizedLang = typeof language === 'string' ? language.trim().toLowerCase() : '';
+  if (normalizedLang === 'js') normalizedLang = 'javascript';
+
+  if (normalizedLang !== 'python' && normalizedLang !== 'javascript') {
+    return res.status(400).json({
+      verdict: 'Runtime Error',
+      passedCount: 0,
+      totalCount: 0,
+      runtimeMs: 0,
+      cases: [],
+      errorMessage: 'Judge supports "python" and "javascript".'
+    });
+  }
+
+  if (typeof code !== 'string' || code.trim().length === 0) {
+    return res.status(400).json({
+      verdict: 'Compile Error',
+      passedCount: 0,
+      totalCount: Array.isArray(testCases) ? testCases.length : 0,
+      runtimeMs: 0,
+      cases: [],
+      errorLine: 1,
+      errorMessage: 'Source code cannot be empty.'
+    });
+  }
+
+  if (code.length > 64 * 1024) {
+    return res.status(413).json({
+      verdict: 'Compile Error',
+      passedCount: 0,
+      totalCount: Array.isArray(testCases) ? testCases.length : 0,
+      runtimeMs: 0,
+      cases: [],
+      errorLine: 1,
+      errorMessage: 'Source code exceeds 64KB limit.'
+    });
+  }
+
+  const securityCheck = auditCodeSecurity(normalizedLang, code);
+  if (securityCheck.dangerous) {
+    return res.json({
+      verdict: 'Runtime Error',
+      passedCount: 0,
+      totalCount: Array.isArray(testCases) ? testCases.length : 0,
+      runtimeMs: Date.now() - startTime,
+      cases: [],
+      errorLine: 1,
+      errorMessage: `[SecurityPolicyViolation] ${securityCheck.reason}`
+    });
+  }
+
+  const deadline = Math.min(Math.max(Number(timeoutMs) || 3000, 500), 5000);
+  const safeCases = Array.isArray(testCases) ? testCases : [];
+
+  if (normalizedLang === 'javascript') {
+    try {
+      acorn.parse(code, { ecmaVersion: 'latest', sourceType: 'script', locations: true });
+      new vm.Script(code, { filename: 'solution.js' });
+    } catch (synErr: any) {
+      const line = synErr?.loc?.line || 1;
+      const msg = synErr?.message ? String(synErr.message).replace(/\s*\(\d+:\d+\)$/, '') : 'SyntaxError';
+      return res.json({
+        verdict: 'Compile Error',
+        passedCount: 0,
+        totalCount: safeCases.length,
+        runtimeMs: Date.now() - startTime,
+        cases: [],
+        errorLine: line,
+        errorMessage: msg
+      });
+    }
+
+    const activeLogs: string[] = [];
+    const baseSandboxKeys = new Set([
+      'console', 'Math', 'Date', 'JSON', 'Array', 'Object', 'String', 'Number',
+      'Boolean', 'RegExp', 'Map', 'Set', 'BigInt', 'Error', 'TypeError', 'RangeError',
+      'Uint8Array', 'Int32Array', 'parseInt', 'parseFloat', 'isNaN', 'isFinite',
+      '__lcParseArg', '__lcDeepEqual', '__lcCanonical'
+    ]);
+
+    const parseArgValue = (raw: string) => {
+      const trimmed = String(raw).trim();
+      try {
+        return JSON.parse(trimmed);
+      } catch {
+        try {
+          return vm.runInNewContext(`(${trimmed})`, {}, { timeout: 200 });
+        } catch {
+          return trimmed;
+        }
+      }
+    };
+
+    const canonicalize = (val: any): any => {
+      if (Array.isArray(val)) {
+        return val.map(canonicalize);
+      }
+      if (val && typeof val === 'object') {
+        const sorted: Record<string, any> = {};
+        for (const k of Object.keys(val).sort()) {
+          sorted[k] = canonicalize(val[k]);
+        }
+        return sorted;
+      }
+      return val;
+    };
+
+    const deepEqual = (a: any, b: any, unordered: boolean): boolean => {
+      if (a === b) return true;
+      if (typeof a === 'number' && typeof b === 'number') {
+        if (Number.isNaN(a) && Number.isNaN(b)) return true;
+        return Math.abs(a - b) <= 1e-5;
+      }
+      if (Array.isArray(a) && Array.isArray(b)) {
+        if (a.length !== b.length) return false;
+        if (!unordered) {
+          return a.every((v, idx) => deepEqual(v, b[idx], false));
+        }
+        const normA = a.map((item) => JSON.stringify(canonicalize(Array.isArray(item) ? [...item].sort((x, y) => JSON.stringify(x).localeCompare(JSON.stringify(y))) : item))).sort();
+        const normB = b.map((item) => JSON.stringify(canonicalize(Array.isArray(item) ? [...item].sort((x, y) => JSON.stringify(x).localeCompare(JSON.stringify(y))) : item))).sort();
+        return JSON.stringify(normA) === JSON.stringify(normB);
+      }
+      if (a && b && typeof a === 'object' && typeof b === 'object') {
+        const ka = Object.keys(a);
+        const kb = Object.keys(b);
+        if (ka.length !== kb.length) return false;
+        return ka.every((k) => Object.prototype.hasOwnProperty.call(b, k) && deepEqual(a[k], b[k], false));
+      }
+      return false;
+    };
+
+    const sandbox: Record<string, any> = {
+      console: {
+        log: (...args: any[]) =>
+          activeLogs.push(args.map((a) => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ')),
+        error: (...args: any[]) =>
+          activeLogs.push('[ERROR] ' + args.map((a) => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ')),
+        warn: (...args: any[]) =>
+          activeLogs.push('[WARN] ' + args.map((a) => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ')),
+        info: (...args: any[]) =>
+          activeLogs.push(args.map((a) => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' '))
+      },
+      Math, Date, JSON, Array, Object, String, Number, Boolean, RegExp,
+      Map, Set, BigInt, Error, TypeError, RangeError, Uint8Array, Int32Array,
+      parseInt, parseFloat, isNaN, isFinite
+    };
+
+    const context = vm.createContext(sandbox);
+
+    try {
+      const userScript = new vm.Script(code, { filename: 'solution.js' });
+      userScript.runInContext(context, { timeout: deadline, breakOnSigint: true });
+    } catch (runErr: any) {
+      const isTimeout = runErr?.message?.includes('timed out');
+      const lineMatch = String(runErr?.stack || '').match(/solution\.js:(\d+)/);
+      return res.json({
+        verdict: isTimeout ? 'Time Limit Exceeded' : 'Runtime Error',
+        passedCount: 0,
+        totalCount: safeCases.length,
+        runtimeMs: Date.now() - startTime,
+        cases: [],
+        errorLine: lineMatch ? parseInt(lineMatch[1], 10) : 1,
+        errorMessage: isTimeout ? `Time Limit Exceeded (${deadline}ms)` : (runErr?.message || 'Runtime Error')
+      });
+    }
+
+    const globalStdout = activeLogs.join('\n');
+    activeLogs.length = 0;
+
+    let targetFn: ((...args: any[]) => any) | null = null;
+    let targetThis: any = undefined;
+
+    if (typeof sandbox.Solution === 'function') {
+      try {
+        const inst = new sandbox.Solution();
+        if (typeof inst?.[methodName] === 'function') {
+          targetFn = inst[methodName];
+          targetThis = inst;
+        } else {
+          const protoKeys = Object.getOwnPropertyNames(Object.getPrototypeOf(inst) || {}).filter(
+            (k) => k !== 'constructor' && typeof inst[k] === 'function'
+          );
+          if (protoKeys.length > 0) {
+            targetFn = inst[protoKeys[0]];
+            targetThis = inst;
+          }
+        }
+      } catch {
+        // Ignore instantiation error; fall through
+      }
+    }
+
+    if (!targetFn && typeof sandbox[methodName] === 'function') {
+      targetFn = sandbox[methodName];
+    }
+
+    if (!targetFn) {
+      const userDefinedFns = Object.keys(sandbox).filter(
+        (k) => !baseSandboxKeys.has(k) && typeof sandbox[k] === 'function'
+      );
+      if (userDefinedFns.length > 0) {
+        targetFn = sandbox[userDefinedFns[userDefinedFns.length - 1]];
+      }
+    }
+
+    // Fallback: standalone script using console.log
+    if (!targetFn) {
+      const expectedStr = (expectedPrintSubstring || safeCases[0]?.expectedDisplay || '').trim();
+      const normalizedExpected = expectedStr.replace(/^["']|["']$/g, '').toLowerCase();
+      const passed = normalizedExpected ? globalStdout.toLowerCase().includes(normalizedExpected) : globalStdout.length > 0;
+      const elapsed = Date.now() - startTime;
+      return res.json({
+        verdict: passed ? 'Accepted' : 'Wrong Answer',
+        passedCount: passed ? 1 : 0,
+        totalCount: 1,
+        runtimeMs: elapsed,
+        cases: [
+          {
+            id: 'script-1',
+            label: 'Script Output',
+            passed,
+            inputDisplay: safeCases[0]?.inputs?.map((i: any) => `${i.name} = ${i.value}`).join(', ') || '(script)',
+            stdout: globalStdout,
+            actualOutput: globalStdout || '(no output)',
+            expectedOutput: expectedStr || '(non-empty output)',
+            error: null
+          }
+        ]
+      });
+    }
+
+    const caseResults: any[] = [];
+    for (let i = 0; i < safeCases.length; i += 1) {
+      const tc = safeCases[i];
+      const parsedArgs = (tc.inputs || []).map((inp: any) => parseArgValue(inp.value));
+      const inputDisplay = (tc.inputs || []).map((inp: any) => `${inp.name} = ${inp.value}`).join('\n');
+      activeLogs.length = 0;
+
+      try {
+        sandbox.__lcTarget = targetFn;
+        sandbox.__lcThis = targetThis;
+        sandbox.__lcArgs = parsedArgs;
+        let actual = vm.runInContext(
+          '__lcTarget.apply(__lcThis, __lcArgs)',
+          context,
+          { timeout: deadline, breakOnSigint: true }
+        );
+        if (actual === undefined && parsedArgs.length > 0) {
+          actual = parsedArgs[0];
+        }
+        const caseStdout = activeLogs.join('\n');
+        const actualStr = JSON.stringify(actual) ?? String(actual);
+
+        let passed = true;
+        if (tc.hasExpected) {
+          const expectedVal = parseArgValue(tc.expectedDisplay);
+          passed = deepEqual(actual, expectedVal, Boolean(unorderedReturn));
+        }
+
+        caseResults.push({
+          id: tc.id || `case-${i + 1}`,
+          label: tc.label || `Case ${i + 1}`,
+          passed,
+          inputDisplay,
+          stdout: caseStdout,
+          actualOutput: actualStr,
+          expectedOutput: tc.hasExpected ? tc.expectedDisplay : '(custom case)',
+          error: null
+        });
+      } catch (caseErr: any) {
+        const isTimeout = caseErr?.message?.includes('timed out');
+        const lineMatch = String(caseErr?.stack || '').match(/solution\.js:(\d+)/);
+        const errMsg = isTimeout
+          ? `Time Limit Exceeded (${deadline}ms)`
+          : (caseErr?.message || 'Runtime Error');
+
+        caseResults.push({
+          id: tc.id || `case-${i + 1}`,
+          label: tc.label || `Case ${i + 1}`,
+          passed: false,
+          inputDisplay,
+          stdout: activeLogs.join('\n'),
+          actualOutput: '',
+          expectedOutput: tc.hasExpected ? tc.expectedDisplay : '(custom case)',
+          error: errMsg
+        });
+
+        return res.json({
+          verdict: isTimeout ? 'Time Limit Exceeded' : 'Runtime Error',
+          passedCount: caseResults.filter((c) => c.passed).length,
+          totalCount: safeCases.length,
+          runtimeMs: Date.now() - startTime,
+          cases: caseResults,
+          errorLine: lineMatch ? parseInt(lineMatch[1], 10) : 1,
+          errorMessage: errMsg
+        });
+      }
+    }
+
+    const passedCount = caseResults.filter((c) => c.passed).length;
+    const allPassed = passedCount === caseResults.length && caseResults.length > 0;
+    return res.json({
+      verdict: allPassed ? 'Accepted' : 'Wrong Answer',
+      passedCount,
+      totalCount: caseResults.length,
+      runtimeMs: Date.now() - startTime,
+      cases: caseResults
+    });
+  }
+
+  // Python LeetCode Judge Runner
+  if (!RUNTIME_AVAILABILITY.python) {
+    return res.json({
+      verdict: 'Runtime Error',
+      passedCount: 0,
+      totalCount: safeCases.length,
+      runtimeMs: 0,
+      cases: [],
+      errorLine: 1,
+      errorMessage: 'Python 3 runtime is unavailable in this environment.'
+    });
+  }
+
+  const pyJudgeScript = `
+import sys, json, io, ast, copy, math, collections, heapq, bisect, itertools, functools, re, types, traceback
+from typing import List, Dict, Set, Tuple, Optional, Any, Callable
+from collections import defaultdict, deque, Counter
+from contextlib import redirect_stdout
+
+payload = json.loads(sys.stdin.read())
+user_code = payload["code"]
+method_name = payload.get("methodName", "solve")
+unordered = bool(payload.get("unorderedReturn", False))
+test_cases = payload.get("testCases", [])
+expected_sub = payload.get("expectedPrintSubstring", "")
+
+def parse_literal(raw):
+    text = str(raw).strip()
+    try:
+        return json.loads(text)
+    except Exception:
+        try:
+            return ast.literal_eval(text)
+        except Exception:
+            return text
+
+def canonical_sort(val):
+    if isinstance(val, list):
+        items = [canonical_sort(x) for x in val]
+        return sorted(items, key=lambda x: json.dumps(x, sort_keys=True))
+    if isinstance(val, tuple):
+        return canonical_sort(list(val))
+    if isinstance(val, dict):
+        return {str(k): canonical_sort(v) for k, v in sorted(val.items())}
+    return val
+
+def deep_equal(a, b, is_unordered):
+    if isinstance(a, tuple):
+        a = list(a)
+    if isinstance(b, tuple):
+        b = list(b)
+    if isinstance(a, bool) or isinstance(b, bool):
+        return type(a) is type(b) and a == b
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return abs(a - b) <= 1e-5
+    if isinstance(a, list) and isinstance(b, list):
+        if len(a) != len(b):
+            return False
+        if not is_unordered:
+            return all(deep_equal(x, y, False) for x, y in zip(a, b))
+        return canonical_sort(a) == canonical_sort(b)
+    if isinstance(a, dict) and isinstance(b, dict):
+        if set(a.keys()) != set(b.keys()):
+            return False
+        return all(deep_equal(a[k], b[k], False) for k in a)
+    return a == b
+
+def to_json_safe(val):
+    if isinstance(val, tuple):
+        return [to_json_safe(x) for x in val]
+    if isinstance(val, set):
+        return [to_json_safe(x) for x in sorted(val, key=lambda x: str(x))]
+    if isinstance(val, list):
+        return [to_json_safe(x) for x in val]
+    if isinstance(val, dict):
+        return {str(k): to_json_safe(v) for k, v in val.items()}
+    return val
+
+def extract_solution_line(exc):
+    tb = traceback.extract_tb(exc.__traceback__)
+    for frame in reversed(tb):
+        if frame.filename == "<solution>":
+            return frame.lineno
+    return 1
+
+ns = {
+    "List": List, "Dict": Dict, "Set": Set, "Tuple": Tuple,
+    "Optional": Optional, "Any": Any, "Callable": Callable,
+    "math": math, "collections": collections, "heapq": heapq,
+    "bisect": bisect, "itertools": itertools, "functools": functools,
+    "re": re, "defaultdict": defaultdict, "deque": deque, "Counter": Counter
+}
+
+try:
+    compiled = compile(user_code, "<solution>", "exec")
+except SyntaxError as syn:
+    print(json.dumps({
+        "verdict": "Compile Error",
+        "passedCount": 0,
+        "totalCount": len(test_cases),
+        "cases": [],
+        "errorLine": syn.lineno or 1,
+        "errorMessage": f"{syn.msg} (col {syn.offset or 1})"
+    }))
+    sys.exit(0)
+
+top_buf = io.StringIO()
+try:
+    with redirect_stdout(top_buf):
+        exec(compiled, ns)
+except Exception as exc:
+    print(json.dumps({
+        "verdict": "Runtime Error",
+        "passedCount": 0,
+        "totalCount": len(test_cases),
+        "cases": [],
+        "errorLine": extract_solution_line(exc),
+        "errorMessage": f"{type(exc).__name__}: {exc}"
+    }))
+    sys.exit(0)
+
+target_fn = None
+if "Solution" in ns and isinstance(ns["Solution"], type):
+    try:
+        inst = ns["Solution"]()
+        if hasattr(inst, method_name) and callable(getattr(inst, method_name)):
+            target_fn = getattr(inst, method_name)
+        else:
+            for attr in dir(inst):
+                if not attr.startswith("_") and callable(getattr(inst, attr)):
+                    target_fn = getattr(inst, attr)
+                    break
+    except Exception:
+        pass
+
+if target_fn is None and method_name in ns and callable(ns[method_name]):
+    target_fn = ns[method_name]
+
+if target_fn is None:
+    user_fns = [
+        v for k, v in ns.items()
+        if isinstance(v, types.FunctionType) and getattr(v, "__code__", None) and v.__code__.co_filename == "<solution>"
+    ]
+    if user_fns:
+        target_fn = user_fns[-1]
+
+if target_fn is None:
+    global_out = top_buf.getvalue().strip()
+    expected_str = str(expected_sub or (test_cases[0].get("expectedDisplay", "") if test_cases else "")).strip()
+    norm_exp = expected_str.strip("\\"'").lower()
+    passed = (norm_exp in global_out.lower()) if norm_exp else len(global_out) > 0
+    inp_disp = ", ".join(f'{i["name"]} = {i["value"]}' for i in test_cases[0].get("inputs", [])) if test_cases else "(script)"
+    print(json.dumps({
+        "verdict": "Accepted" if passed else "Wrong Answer",
+        "passedCount": 1 if passed else 0,
+        "totalCount": 1,
+        "cases": [{
+            "id": "script-1",
+            "label": "Script Output",
+            "passed": passed,
+            "inputDisplay": inp_disp,
+            "stdout": global_out,
+            "actualOutput": global_out or "(no output)",
+            "expectedOutput": expected_str or "(non-empty output)",
+            "error": None
+        }]
+    }))
+    sys.exit(0)
+
+results = []
+for idx, tc in enumerate(test_cases):
+    inputs = tc.get("inputs", [])
+    args = [parse_literal(item["value"]) for item in inputs]
+    input_disp = "\\n".join(f'{item["name"]} = {item["value"]}' for item in inputs)
+    case_buf = io.StringIO()
+    try:
+        call_args = copy.deepcopy(args)
+        with redirect_stdout(case_buf):
+            actual = target_fn(*call_args)
+        has_exp = bool(tc.get("hasExpected", False))
+        exp_disp = tc.get("expectedDisplay", "")
+        exp_val = parse_literal(exp_disp) if has_exp else None
+        if actual is None and len(call_args) > 0 and isinstance(exp_val, list):
+            actual = call_args[0]
+        actual_safe = to_json_safe(actual)
+        actual_str = json.dumps(actual_safe)
+        passed = True
+        if has_exp:
+            passed = deep_equal(actual_safe, exp_val, unordered)
+        results.append({
+            "id": tc.get("id", f"case-{idx+1}"),
+            "label": tc.get("label", f"Case {idx+1}"),
+            "passed": passed,
+            "inputDisplay": input_disp,
+            "stdout": case_buf.getvalue().rstrip("\\n"),
+            "actualOutput": actual_str,
+            "expectedOutput": exp_disp if has_exp else "(custom case)",
+            "error": None
+        })
+    except Exception as exc:
+        err_msg = f"{type(exc).__name__}: {exc}"
+        results.append({
+            "id": tc.get("id", f"case-{idx+1}"),
+            "label": tc.get("label", f"Case {idx+1}"),
+            "passed": False,
+            "inputDisplay": input_disp,
+            "stdout": case_buf.getvalue().rstrip("\\n"),
+            "actualOutput": "",
+            "expectedOutput": tc.get("expectedDisplay", ""),
+            "error": err_msg
+        })
+        print(json.dumps({
+            "verdict": "Runtime Error",
+            "passedCount": sum(1 for r in results if r["passed"]),
+            "totalCount": len(test_cases),
+            "cases": results,
+            "errorLine": extract_solution_line(exc),
+            "errorMessage": err_msg
+        }))
+        sys.exit(0)
+
+passed_count = sum(1 for r in results if r["passed"])
+print(json.dumps({
+    "verdict": "Accepted" if (passed_count == len(results) and len(results) > 0) else "Wrong Answer",
+    "passedCount": passed_count,
+    "totalCount": len(results),
+    "cases": results
+}))
+`;
+
+  const pyProcess = spawn('python3', ['-I', '-c', pyJudgeScript], {
+    timeout: deadline,
+    env: {
+      PYTHONUNBUFFERED: '1',
+      PYTHONDONTWRITEBYTECODE: '1'
+    }
+  });
+
+  let stdoutData = '';
+  let stderrData = '';
+  let timedOut = false;
+
+  const timer = setTimeout(() => {
+    timedOut = true;
+    pyProcess.kill('SIGKILL');
+  }, deadline);
+
+  pyProcess.stdin.write(
+    JSON.stringify({
+      code,
+      methodName,
+      unorderedReturn,
+      testCases: safeCases,
+      expectedPrintSubstring
+    })
+  );
+  pyProcess.stdin.end();
+
+  pyProcess.stdout.on('data', (chunk) => {
+    stdoutData += chunk.toString();
+  });
+
+  pyProcess.stderr.on('data', (chunk) => {
+    stderrData += chunk.toString();
+  });
+
+  pyProcess.on('close', () => {
+    clearTimeout(timer);
+    const elapsed = Date.now() - startTime;
+    if (timedOut) {
+      return res.json({
+        verdict: 'Time Limit Exceeded',
+        passedCount: 0,
+        totalCount: safeCases.length,
+        runtimeMs: elapsed,
+        cases: [],
+        errorLine: 1,
+        errorMessage: `Time Limit Exceeded (${deadline}ms)`
+      });
+    }
+    try {
+      const parsed = JSON.parse(stdoutData.trim());
+      return res.json({
+        ...parsed,
+        runtimeMs: elapsed
+      });
+    } catch {
+      return res.json({
+        verdict: 'Runtime Error',
+        passedCount: 0,
+        totalCount: safeCases.length,
+        runtimeMs: elapsed,
+        cases: [],
+        errorLine: 1,
+        errorMessage: stderrData.trim() || 'Judge runner failed to produce a verdict.'
+      });
+    }
+  });
+});
+
 // Module E: Cross-Language Pricing Map Exchange
 app.post('/api/interop/pricing', (req: Request, res: Response) => {
   const startTime = Date.now();

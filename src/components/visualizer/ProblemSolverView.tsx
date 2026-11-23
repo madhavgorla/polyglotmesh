@@ -1,7 +1,13 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import Editor, { OnMount } from '@monaco-editor/react';
 import {
   ArrowLeft,
+  ChevronLeft,
+  ChevronRight,
+  ChevronDown,
+  ChevronUp,
+  Shuffle,
+  List,
   Play,
   Upload,
   Eye,
@@ -9,11 +15,26 @@ import {
   CheckCircle2,
   XCircle,
   RotateCcw,
-  Bug
+  Bug,
+  Clock,
+  Pause,
+  Maximize2,
+  Minimize2,
+  Settings2,
+  Plus,
+  X,
+  Code2,
+  Check,
+  Search
 } from 'lucide-react';
 import {
+  ALGORITHM_PROBLEMS,
   AlgorithmProblem
 } from '../../data/visualizerProblems';
+import {
+  getLeetCodeSpec,
+  LeetCodeTestCase
+} from '../../data/leetcodeSpecs';
 import {
   PalindromeLinkedListVisual,
   MergeIntervalsVisual,
@@ -23,55 +44,246 @@ import {
 import { LiveMemoryVisualiser } from './LiveMemoryVisualiser';
 import { PlaybackBar } from './PlaybackBar';
 import { ConfettiBurst } from './ConfettiBurst';
-import { DebugResponse, DebugStep, ExecutionResponse, SupportedLanguage } from '../../types';
+import { configureLeetCodeMonaco } from './monacoLeetCodeSetup';
+import { DebugResponse, DebugStep, SupportedLanguage } from '../../types';
+
+interface JudgeCaseResult {
+  id: string;
+  label: string;
+  passed: boolean;
+  inputDisplay: string;
+  stdout: string;
+  actualOutput: string;
+  expectedOutput: string;
+  error: string | null;
+}
+
+interface JudgeVerdictResponse {
+  verdict:
+    | 'Accepted'
+    | 'Wrong Answer'
+    | 'Runtime Error'
+    | 'Compile Error'
+    | 'Time Limit Exceeded';
+  passedCount: number;
+  totalCount: number;
+  runtimeMs: number;
+  cases: JudgeCaseResult[];
+  errorLine?: number | null;
+  errorMessage?: string | null;
+  isSubmit?: boolean;
+}
+
+interface EditorPreferences {
+  fontSize: number;
+  tabSize: 2 | 4;
+  wordWrap: 'off' | 'on';
+  autocomplete: boolean;
+}
 
 interface ProblemSolverViewProps {
   problem: AlgorithmProblem;
+  problems?: AlgorithmProblem[];
+  solvedIds?: string[];
   initialLanguage?: 'python' | 'javascript';
   isSolved?: boolean;
+  onSelectProblem?: (problem: AlgorithmProblem) => void;
   onBackToProblems: () => void;
   onGoHome: () => void;
   onSolved: (problemId: string) => void;
   onToggleSolved?: (problemId: string) => void;
 }
 
+const PREFS_STORAGE_KEY = 'polyglotmesh_editor_prefs_v1';
+const DRAFT_KEY_PREFIX = 'polyglotmesh_draft_v1';
+const NOTE_KEY_PREFIX = 'polyglotmesh_note_v1';
+
+function readEditorPrefs(): EditorPreferences {
+  try {
+    const raw = window.localStorage.getItem(PREFS_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      return {
+        fontSize: Number(parsed.fontSize) || 13,
+        tabSize: parsed.tabSize === 2 ? 2 : 4,
+        wordWrap: parsed.wordWrap === 'on' ? 'on' : 'off',
+        autocomplete: parsed.autocomplete !== false
+      };
+    }
+  } catch {
+    // Ignore storage errors
+  }
+  return { fontSize: 13, tabSize: 4, wordWrap: 'off', autocomplete: true };
+}
+
+function readDraft(problemId: string, lang: string): string {
+  try {
+    return window.localStorage.getItem(`${DRAFT_KEY_PREFIX}:${problemId}:${lang}`) || '';
+  } catch {
+    return '';
+  }
+}
+
+function writeDraft(problemId: string, lang: string, value: string) {
+  try {
+    const key = `${DRAFT_KEY_PREFIX}:${problemId}:${lang}`;
+    if (!value) {
+      window.localStorage.removeItem(key);
+    } else {
+      window.localStorage.setItem(key, value);
+    }
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+function readNote(problemId: string): string {
+  try {
+    return window.localStorage.getItem(`${NOTE_KEY_PREFIX}:${problemId}`) || '';
+  } catch {
+    return '';
+  }
+}
+
+function writeNote(problemId: string, value: string) {
+  try {
+    const key = `${NOTE_KEY_PREFIX}:${problemId}`;
+    if (!value) {
+      window.localStorage.removeItem(key);
+    } else {
+      window.localStorage.setItem(key, value);
+    }
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+function formatTimer(seconds: number): string {
+  const hrs = Math.floor(seconds / 3600);
+  const mins = Math.floor((seconds % 3600) / 60);
+  const secs = seconds % 60;
+  if (hrs > 0) {
+    return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+  }
+  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+}
+
 export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
   problem,
+  problems = ALGORITHM_PROBLEMS,
+  solvedIds = [],
   initialLanguage = 'python',
   isSolved,
+  onSelectProblem,
   onBackToProblems,
   onGoHome,
   onSolved,
   onToggleSolved
 }) => {
   const [lang, setLang] = useState<'python' | 'javascript'>(initialLanguage);
-  const [code, setCode] = useState<string>('');
+  const [code, setCode] = useState<string>(() => readDraft(problem.id, initialLanguage));
+  const [noteText, setNoteText] = useState<string>(() => readNote(problem.id));
   const [localSolved, setLocalSolved] = useState<boolean>(false);
   const [confettiTrigger, setConfettiTrigger] = useState<number>(0);
-  const [leftTab, setLeftTab] = useState<'description' | 'visualiser'>('description');
+
+  // Left & Bottom Panel Tabs
+  const [leftTab, setLeftTab] = useState<'description' | 'notes' | 'visualiser'>('description');
   const [bottomTab, setBottomTab] = useState<'cases' | 'result'>('cases');
-  const [isRunning, setIsRunning] = useState(false);
-  const [result, setResult] = useState<ExecutionResponse | null>(null);
-  const [submissionStatus, setSubmissionStatus] = useState<'idle' | 'passed' | 'failed'>('idle');
-  const [syntaxErrors, setSyntaxErrors] = useState<Array<{ line: number; column: number; message: string }>>([]);
+  const [topicsOpen, setTopicsOpen] = useState<boolean>(false);
+
+  // Testcases & Judge State
+  const leetcodeSpec = useMemo(() => getLeetCodeSpec(problem), [problem]);
+  const [testCases, setTestCases] = useState<LeetCodeTestCase[]>(leetcodeSpec.defaultTestCases);
+  const [activeCaseIdx, setActiveCaseIdx] = useState<number>(0);
+  const [activeResultCaseIdx, setActiveResultCaseIdx] = useState<number>(0);
+  const [isRunning, setIsRunning] = useState<boolean>(false);
+  const [judgeResult, setJudgeResult] = useState<JudgeVerdictResponse | null>(null);
+
+  // Syntax & Live Debugger State
+  const [syntaxErrors, setSyntaxErrors] = useState<
+    Array<{ line: number; column: number; message: string }>
+  >([]);
   const [debugSteps, setDebugSteps] = useState<DebugStep[]>([]);
   const [debugStepIndex, setDebugStepIndex] = useState<number>(0);
   const [isDebugging, setIsDebugging] = useState<boolean>(false);
   const [isPlayingDebug, setIsPlayingDebug] = useState<boolean>(false);
   const [debugTruncated, setDebugTruncated] = useState<boolean>(false);
-  const [debugRuntimeError, setDebugRuntimeError] = useState<{ type: string; message: string; line: number } | null>(null);
-  const [debugSyntaxError, setDebugSyntaxError] = useState<{ line: number; column: number; message: string } | null>(null);
+  const [debugRuntimeError, setDebugRuntimeError] = useState<{
+    type: string;
+    message: string;
+    line: number;
+  } | null>(null);
+  const [debugSyntaxError, setDebugSyntaxError] = useState<{
+    line: number;
+    column: number;
+    message: string;
+  } | null>(null);
   const [debugDirty, setDebugDirty] = useState<boolean>(false);
   const [breakpoints, setBreakpoints] = useState<number[]>([]);
   const [visualiserMode, setVisualiserMode] = useState<'trace' | 'illustration'>('trace');
   const [editorMounted, setEditorMounted] = useState<boolean>(false);
+  const [cursorPos, setCursorPos] = useState<{ line: number; column: number }>({
+    line: 1,
+    column: 1
+  });
+
+  // LeetCode Workspace UX Controls (Resizable Panes, Timer, Settings, Problem Switcher)
+  const [leftWidthPct, setLeftWidthPct] = useState<number>(43);
+  const [consoleHeightPx, setConsoleHeightPx] = useState<number>(220);
+  const [consoleCollapsed, setConsoleCollapsed] = useState<boolean>(false);
+  const [editorMaximized, setEditorMaximized] = useState<boolean>(false);
+  const [settingsOpen, setSettingsOpen] = useState<boolean>(false);
+  const [drawerOpen, setDrawerOpen] = useState<boolean>(false);
+  const [drawerQuery, setDrawerQuery] = useState<string>('');
+  const [editorPrefs, setEditorPrefs] = useState<EditorPreferences>(readEditorPrefs);
+
+  // Focus Timer (Stopwatch)
+  const [timerSeconds, setTimerSeconds] = useState<number>(0);
+  const [timerRunning, setTimerRunning] = useState<boolean>(false);
 
   const editorRef = useRef<any>(null);
   const monacoRef = useRef<any>(null);
   const decorationsRef = useRef<any>(null);
   const editSeqRef = useRef<number>(0);
+  const workspaceRef = useRef<HTMLDivElement | null>(null);
+  const rightPaneRef = useRef<HTMLDivElement | null>(null);
+  const runActionRef = useRef<(isSubmit: boolean) => void>(() => {});
 
-  const setEditorMarkers = React.useCallback(
+  const currentProblemIndex = useMemo(
+    () => problems.findIndex((p) => p.id === problem.id),
+    [problems, problem.id]
+  );
+
+  const drawerProblems = useMemo(() => {
+    const q = drawerQuery.trim().toLowerCase();
+    if (!q) return problems;
+    return problems.filter(
+      (p) =>
+        p.title.toLowerCase().includes(q) ||
+        String(p.leetcodeNumber || '').includes(q) ||
+        (p.category || '').toLowerCase().includes(q)
+    );
+  }, [problems, drawerQuery]);
+
+  // Persist editor preferences
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(PREFS_STORAGE_KEY, JSON.stringify(editorPrefs));
+    } catch {
+      // Ignore storage errors
+    }
+  }, [editorPrefs]);
+
+  // Timer tick
+  useEffect(() => {
+    if (!timerRunning) return;
+    const id = window.setInterval(() => {
+      setTimerSeconds((s) => s + 1);
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [timerRunning]);
+
+  const setEditorMarkers = useCallback(
     (
       synErr: { line: number; column?: number; message: string } | null,
       runErr: { type: string; message: string; line: number } | null
@@ -107,13 +319,18 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
     []
   );
 
+  // Sync when switching problem or language
   useEffect(() => {
     editSeqRef.current += 1;
-    setCode('');
+    const saved = readDraft(problem.id, lang);
+    setCode(saved);
+    setNoteText(readNote(problem.id));
+    setTestCases(leetcodeSpec.defaultTestCases);
+    setActiveCaseIdx(0);
+    setActiveResultCaseIdx(0);
     setLocalSolved(false);
     setConfettiTrigger(0);
-    setResult(null);
-    setSubmissionStatus('idle');
+    setJudgeResult(null);
     setSyntaxErrors([]);
     setDebugSteps([]);
     setDebugStepIndex(0);
@@ -123,7 +340,17 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
     setIsPlayingDebug(false);
     setBreakpoints([]);
     setEditorMarkers(null, null);
-  }, [problem, lang, setEditorMarkers]);
+  }, [problem, lang, leetcodeSpec, setEditorMarkers]);
+
+  // Save draft on code changes
+  useEffect(() => {
+    writeDraft(problem.id, lang, code);
+  }, [problem.id, lang, code]);
+
+  // Save notes on change
+  useEffect(() => {
+    writeNote(problem.id, noteText);
+  }, [problem.id, noteText]);
 
   const effectiveSolved = isSolved ?? localSolved;
 
@@ -135,7 +362,7 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
       } else {
         onSolved(problem.id);
       }
-      setConfettiTrigger(prev => prev + 1);
+      setConfettiTrigger((prev) => prev + 1);
     } else {
       setLocalSolved(false);
       if (onToggleSolved) {
@@ -152,8 +379,35 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
     editor.focus();
   };
 
-  const runDebugTrace = React.useCallback(
-    async (sourceCode = code, startPlayback = false, silent = false, expectedSeq?: number) => {
+  const insertSignatureStub = () => {
+    const stub =
+      lang === 'python' ? leetcodeSpec.pythonStub : leetcodeSpec.javascriptStub;
+    editSeqRef.current += 1;
+    setCode(stub);
+    setDebugDirty(false);
+    setSyntaxErrors([]);
+    setDebugSyntaxError(null);
+    setDebugRuntimeError(null);
+    setEditorMarkers(null, null);
+    window.setTimeout(() => {
+      const editor = editorRef.current;
+      const model = editor?.getModel();
+      if (editor && model) {
+        const lastLine = model.getLineCount();
+        const col = model.getLineMaxColumn(lastLine);
+        editor.setPosition({ lineNumber: lastLine, column: col });
+        editor.focus();
+      }
+    }, 20);
+  };
+
+  const runDebugTrace = useCallback(
+    async (
+      sourceCode = code,
+      startPlayback = false,
+      silent = false,
+      expectedSeq?: number
+    ) => {
       if (!silent) {
         setLeftTab('visualiser');
         setVisualiserMode('trace');
@@ -190,7 +444,7 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
         setEditorMarkers(synErr, runErr);
 
         if (runErr && nextSteps.length > 0) {
-          const errIdx = nextSteps.findIndex(s => s.error);
+          const errIdx = nextSteps.findIndex((s) => s.error);
           setDebugStepIndex(errIdx >= 0 ? errIdx : 0);
         } else if (!silent) {
           setDebugStepIndex(0);
@@ -198,7 +452,9 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
             setIsPlayingDebug(true);
           }
         } else {
-          setDebugStepIndex(prev => Math.min(prev, Math.max(0, nextSteps.length - 1)));
+          setDebugStepIndex((prev) =>
+            Math.min(prev, Math.max(0, nextSteps.length - 1))
+          );
         }
       } catch (err: any) {
         if (expectedSeq !== undefined && expectedSeq !== editSeqRef.current) {
@@ -223,7 +479,7 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
   useEffect(() => {
     if (!isPlayingDebug || debugSteps.length === 0) return;
     const timer = setInterval(() => {
-      setDebugStepIndex(prev => {
+      setDebugStepIndex((prev) => {
         if (prev >= debugSteps.length - 1) {
           setIsPlayingDebug(false);
           return prev;
@@ -239,7 +495,7 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
     return () => clearInterval(timer);
   }, [isPlayingDebug, debugSteps, breakpoints]);
 
-  // Apply Monaco debugger decorations (breakpoints, active step line, error line)
+  // Apply Monaco debugger decorations
   useEffect(() => {
     const editor = editorRef.current;
     const monaco = monacoRef.current;
@@ -248,10 +504,15 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
 
     const decos: any[] = [];
     const maxLines = model.getLineCount();
-    const currentStep = leftTab === 'visualiser' ? debugSteps[debugStepIndex] : undefined;
+    const currentStep =
+      leftTab === 'visualiser' ? debugSteps[debugStepIndex] : undefined;
     const activeSynErr = debugSyntaxError || syntaxErrors[0] || null;
     setEditorMarkers(activeSynErr, debugRuntimeError);
-    const errLine = activeSynErr?.line || currentStep?.error?.line || debugRuntimeError?.line || null;
+    const errLine =
+      activeSynErr?.line ||
+      currentStep?.error?.line ||
+      debugRuntimeError?.line ||
+      null;
 
     for (const bpLine of breakpoints) {
       if (bpLine >= 1 && bpLine <= maxLines) {
@@ -266,7 +527,11 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
       }
     }
 
-    if (activeSynErr && activeSynErr.line >= 1 && activeSynErr.line <= maxLines) {
+    if (
+      activeSynErr &&
+      activeSynErr.line >= 1 &&
+      activeSynErr.line <= maxLines
+    ) {
       decos.push({
         range: new monaco.Range(activeSynErr.line, 1, activeSynErr.line, 1),
         options: {
@@ -274,8 +539,14 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
           className: 'debug-error-line'
         }
       });
-    } else if (currentStep && currentStep.line >= 1 && currentStep.line <= maxLines && !debugDirty) {
-      const isErrLine = Boolean(currentStep.error) || errLine === currentStep.line;
+    } else if (
+      currentStep &&
+      currentStep.line >= 1 &&
+      currentStep.line <= maxLines &&
+      !debugDirty
+    ) {
+      const isErrLine =
+        Boolean(currentStep.error) || errLine === currentStep.line;
       decos.push({
         range: new monaco.Range(currentStep.line, 1, currentStep.line, 1),
         options: {
@@ -306,45 +577,20 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
         decorationsRef.current.set(decos);
       }
     }
-  }, [leftTab, debugSteps, debugStepIndex, breakpoints, syntaxErrors, debugSyntaxError, debugRuntimeError, debugDirty, editorMounted, setEditorMarkers]);
+  }, [
+    leftTab,
+    debugSteps,
+    debugStepIndex,
+    breakpoints,
+    syntaxErrors,
+    debugSyntaxError,
+    debugRuntimeError,
+    debugDirty,
+    editorMounted,
+    setEditorMarkers
+  ]);
 
-  const handleEditorDidMount: OnMount = (editor, monaco) => {
-    editorRef.current = editor;
-    monacoRef.current = monaco;
-    monaco.editor.defineTheme('ntree-obsidian', {
-      base: 'vs-dark',
-      inherit: true,
-      rules: [
-        { token: 'comment', foreground: '6b7280', fontStyle: 'italic' },
-        { token: 'keyword', foreground: '60a5fa', fontStyle: 'bold' },
-        { token: 'string', foreground: '34d399' },
-        { token: 'number', foreground: 'fbbf24' }
-      ],
-      colors: {
-        'editor.background': '#0b0b0e',
-        'editor.foreground': '#e5e7eb',
-        'editorCursor.foreground': '#34d399',
-        'editor.lineHighlightBackground': '#18181b88',
-        'editorLineNumber.foreground': '#52525b',
-        'editorLineNumber.activeForeground': '#a1a1aa',
-        'editorGutter.background': '#0b0b0e'
-      }
-    });
-    monaco.editor.setTheme('ntree-obsidian');
-
-    editor.onMouseDown((e: any) => {
-      if (e.target.type === monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN && e.target.position?.lineNumber) {
-        const clickedLine = e.target.position.lineNumber;
-        setBreakpoints(prev =>
-          prev.includes(clickedLine) ? prev.filter(l => l !== clickedLine) : [...prev, clickedLine]
-        );
-      }
-    });
-
-    setEditorMounted(true);
-  };
-
-  // Real-time error checking while writing: fast syntax check (180ms) -> silent runtime check (+320ms)
+  // Real-time syntax & silent error checking while typing
   useEffect(() => {
     const seq = editSeqRef.current;
 
@@ -387,7 +633,7 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
           }
         }
       } catch {
-        // Ignore transient errors during typing
+        // Ignore transient typing network errors
       }
     }, 180);
 
@@ -397,42 +643,249 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
     };
   }, [code, lang, debugDirty, runDebugTrace, setEditorMarkers]);
 
-  const executeCode = async (isSubmit: boolean) => {
-    if (isRunning) return;
-    setIsRunning(true);
-    setBottomTab('result');
-    setSubmissionStatus('idle');
-    try {
-      const res = await fetch('/api/execute', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ language: lang as SupportedLanguage, code, timeoutMs: 3000 })
-      });
-      const data: ExecutionResponse = await res.json();
-      setResult(data);
-      if (isSubmit) {
-        const outputLower = (data.output || '').toLowerCase();
-        const expectedLower = problem.expectedPrintSubstring.toLowerCase();
-        if (data.success && outputLower.includes(expectedLower)) {
-          setSubmissionStatus('passed');
+  const executeJudge = useCallback(
+    async (isSubmit: boolean) => {
+      if (isRunning) return;
+      setIsRunning(true);
+      setConsoleCollapsed(false);
+      setBottomTab('result');
+      setActiveResultCaseIdx(0);
+
+      const casesToRun = isSubmit
+        ? [...testCases, ...leetcodeSpec.hiddenTestCases]
+        : testCases;
+
+      try {
+        const res = await fetch('/api/judge', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            language: lang as SupportedLanguage,
+            code,
+            methodName: leetcodeSpec.methodName,
+            unorderedReturn: leetcodeSpec.unorderedReturn,
+            expectedPrintSubstring: problem.expectedPrintSubstring,
+            testCases: casesToRun,
+            timeoutMs: 3000
+          })
+        });
+        const data: JudgeVerdictResponse = await res.json();
+        setJudgeResult({ ...data, isSubmit });
+
+        if (data.errorLine && data.errorMessage) {
+          if (data.verdict === 'Compile Error') {
+            setDebugSyntaxError({
+              line: data.errorLine,
+              column: 1,
+              message: data.errorMessage
+            });
+          } else {
+            setDebugRuntimeError({
+              type: data.verdict,
+              line: data.errorLine,
+              message: data.errorMessage
+            });
+          }
+        }
+
+        if (isSubmit && data.verdict === 'Accepted') {
           setLocalSolved(true);
           onSolved(problem.id);
-          setConfettiTrigger(prev => prev + 1);
-        } else {
-          setSubmissionStatus('failed');
+          setConfettiTrigger((prev) => prev + 1);
+          setTimerRunning(false);
+        } else if (data.cases?.length) {
+          const firstFail = data.cases.findIndex((c) => !c.passed);
+          if (firstFail >= 0) setActiveResultCaseIdx(firstFail);
         }
+      } catch (err: any) {
+        setJudgeResult({
+          verdict: 'Runtime Error',
+          passedCount: 0,
+          totalCount: casesToRun.length,
+          runtimeMs: 0,
+          cases: [],
+          errorLine: 1,
+          errorMessage: err?.message || 'Judge request failed',
+          isSubmit
+        });
+      } finally {
+        setIsRunning(false);
       }
-    } catch (err: any) {
-      setResult({
-        success: false,
-        output: '',
-        error: err.message || 'Execution request failed',
-        executionTimeMs: 0
-      });
-      if (isSubmit) setSubmissionStatus('failed');
-    } finally {
-      setIsRunning(false);
+    },
+    [
+      isRunning,
+      testCases,
+      leetcodeSpec,
+      lang,
+      code,
+      problem.expectedPrintSubstring,
+      problem.id,
+      onSolved
+    ]
+  );
+
+  useEffect(() => {
+    runActionRef.current = executeJudge;
+  }, [executeJudge]);
+
+  // Global keyboard shortcuts (Ctrl/Cmd+Enter Run, Ctrl/Cmd+Shift+Enter Submit)
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+        e.preventDefault();
+        runActionRef.current(e.shiftKey);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
+
+  const handleEditorDidMount: OnMount = (editor, monaco) => {
+    editorRef.current = editor;
+    monacoRef.current = monaco;
+    configureLeetCodeMonaco(monaco);
+
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => {
+      runActionRef.current(false);
+    });
+    editor.addCommand(
+      monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.Enter,
+      () => {
+        runActionRef.current(true);
+      }
+    );
+
+    editor.onDidChangeCursorPosition((e: any) => {
+      if (e.position) {
+        setCursorPos({
+          line: e.position.lineNumber,
+          column: e.position.column
+        });
+      }
+    });
+
+    editor.onMouseDown((e: any) => {
+      if (
+        e.target.type === monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN &&
+        e.target.position?.lineNumber
+      ) {
+        const clickedLine = e.target.position.lineNumber;
+        setBreakpoints((prev) =>
+          prev.includes(clickedLine)
+            ? prev.filter((l) => l !== clickedLine)
+            : [...prev, clickedLine]
+        );
+      }
+    });
+
+    setEditorMounted(true);
+  };
+
+  // Resizable Horizontal Split Divider
+  const startHorizontalResize = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const container = workspaceRef.current;
+    if (!container) return;
+
+    const onMove = (moveEvt: MouseEvent) => {
+      const rect = container.getBoundingClientRect();
+      const pct = ((moveEvt.clientX - rect.left) / rect.width) * 100;
+      setLeftWidthPct(Math.min(64, Math.max(28, pct)));
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
+
+  // Resizable Vertical Split Divider (Editor / Console)
+  const startVerticalResize = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const container = rightPaneRef.current;
+    if (!container) return;
+
+    const onMove = (moveEvt: MouseEvent) => {
+      const rect = container.getBoundingClientRect();
+      const nextHeight = rect.bottom - moveEvt.clientY;
+      setConsoleCollapsed(false);
+      setConsoleHeightPx(Math.min(Math.max(130, nextHeight), Math.max(220, rect.height - 180)));
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
+
+  const handleAddCustomCase = () => {
+    const template = testCases[activeCaseIdx] || testCases[0];
+    const newCase: LeetCodeTestCase = {
+      id: `custom-${Date.now().toString(36)}`,
+      label: `Case ${testCases.length + 1}`,
+      inputs: template
+        ? template.inputs.map((inp) => ({ ...inp }))
+        : [{ name: 'input', value: '[]' }],
+      expectedDisplay: '',
+      hasExpected: false,
+      isCustom: true
+    };
+    setTestCases((prev) => [...prev, newCase]);
+    setActiveCaseIdx(testCases.length);
+    setConsoleCollapsed(false);
+    setBottomTab('cases');
+  };
+
+  const handleRemoveCase = (idx: number) => {
+    if (testCases.length <= 1) return;
+    setTestCases((prev) => prev.filter((_, i) => i !== idx));
+    setActiveCaseIdx((prev) => Math.max(0, prev >= idx ? prev - 1 : prev));
+  };
+
+  const handleCaseInputChange = (
+    caseIdx: number,
+    inputIdx: number,
+    newVal: string
+  ) => {
+    setTestCases((prev) =>
+      prev.map((tc, cIdx) => {
+        if (cIdx !== caseIdx) return tc;
+        return {
+          ...tc,
+          inputs: tc.inputs.map((inp, iIdx) =>
+            iIdx === inputIdx ? { ...inp, value: newVal } : inp
+          )
+        };
+      })
+    );
+  };
+
+  const goPrevProblem = () => {
+    if (!onSelectProblem || currentProblemIndex <= 0) return;
+    onSelectProblem(problems[currentProblemIndex - 1]);
+  };
+
+  const goNextProblem = () => {
+    if (
+      !onSelectProblem ||
+      currentProblemIndex < 0 ||
+      currentProblemIndex >= problems.length - 1
+    ) {
+      return;
     }
+    onSelectProblem(problems[currentProblemIndex + 1]);
+  };
+
+  const goRandomProblem = () => {
+    if (!onSelectProblem || problems.length === 0) return;
+    const pool = problems.filter((p) => p.id !== problem.id);
+    const chosen =
+      pool.length > 0
+        ? pool[Math.floor(Math.random() * pool.length)]
+        : problems[0];
+    onSelectProblem(chosen);
   };
 
   const renderProblemIllustration = () => {
@@ -448,12 +901,21 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
       default:
         return (
           <div className="p-4 rounded-lg border border-neutral-800 bg-[#0d0d10] space-y-3">
-            <div className="text-xs font-medium text-neutral-300">Example Trace</div>
+            <div className="text-xs font-medium text-neutral-300">
+              Example Trace
+            </div>
             {problem.examples.map((ex, i) => (
               <div key={i} className="font-mono text-xs text-neutral-300 space-y-1">
-                <div><span className="text-neutral-500">Input:</span> {ex.input}</div>
-                <div><span className="text-neutral-500">Output:</span> <span className="text-emerald-400">{ex.output}</span></div>
-                {ex.explanation && <div className="text-neutral-400">{ex.explanation}</div>}
+                <div>
+                  <span className="text-neutral-500">Input:</span> {ex.input}
+                </div>
+                <div>
+                  <span className="text-neutral-500">Output:</span>{' '}
+                  <span className="text-emerald-400">{ex.output}</span>
+                </div>
+                {ex.explanation && (
+                  <div className="text-neutral-400">{ex.explanation}</div>
+                )}
               </div>
             ))}
           </div>
@@ -461,13 +923,105 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
     }
   };
 
+  const activeCase = testCases[activeCaseIdx] || testCases[0];
+  const activeResultCase =
+    judgeResult?.cases?.[activeResultCaseIdx] || judgeResult?.cases?.[0];
+
   return (
-    <div className="min-h-screen bg-[#0a0a0a] text-neutral-100 flex flex-col">
+    <div className="h-screen bg-[#0a0a0a] text-neutral-100 flex flex-col overflow-hidden">
       <ConfettiBurst triggerKey={confettiTrigger} resetKey={problem.id} />
 
-      {/* Top Bar matching the window inside Photo 4 */}
-      <header className="h-12 px-4 border-b border-neutral-800 bg-[#0d0d10] flex items-center justify-between gap-4">
-        <div className="flex items-center gap-4 min-w-0">
+      {/* Quick Problem Switcher Drawer (LeetCode Problem List Sidebar) */}
+      {drawerOpen && (
+        <div className="fixed inset-0 z-50 flex">
+          <div
+            className="fixed inset-0 bg-black/60 backdrop-blur-[1px]"
+            onClick={() => setDrawerOpen(false)}
+          />
+          <aside className="relative z-10 w-80 sm:w-96 max-w-full h-full bg-[#0d0d10] border-r border-neutral-800 flex flex-col">
+            <div className="h-12 px-4 border-b border-neutral-800 flex items-center justify-between gap-2">
+              <span className="text-sm font-semibold text-white">
+                Problem List
+              </span>
+              <button
+                type="button"
+                onClick={() => setDrawerOpen(false)}
+                aria-label="Close problem list"
+                className="p-1.5 rounded-md text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-3 border-b border-neutral-800/80">
+              <div className="relative">
+                <Search className="w-3.5 h-3.5 text-neutral-500 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  type="text"
+                  value={drawerQuery}
+                  onChange={(e) => setDrawerQuery(e.target.value)}
+                  placeholder="Search problems..."
+                  className="w-full bg-[#111114] border border-neutral-800 rounded-md pl-8 pr-3 py-1.5 text-xs text-neutral-100 placeholder-neutral-500 focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto divide-y divide-neutral-800/50">
+              {drawerProblems.map((item) => {
+                const isCurrent = item.id === problem.id;
+                const itemSolved = solvedIds.includes(item.id);
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => {
+                      onSelectProblem?.(item);
+                      setDrawerOpen(false);
+                    }}
+                    className={`w-full px-4 py-2.5 flex items-center justify-between gap-3 text-left transition-colors ${
+                      isCurrent
+                        ? 'bg-neutral-800/80 text-white'
+                        : 'hover:bg-neutral-800/40 text-neutral-300'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <span
+                        className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center shrink-0 ${
+                          itemSolved
+                            ? 'border-emerald-400 bg-emerald-400 text-neutral-950'
+                            : 'border-neutral-600'
+                        }`}
+                      >
+                        {itemSolved && <Check className="w-2.5 h-2.5 stroke-[3]" />}
+                      </span>
+                      <span className="text-xs font-medium truncate">
+                        {item.leetcodeNumber ? `${item.leetcodeNumber}. ` : ''}
+                        {item.title}
+                      </span>
+                    </div>
+                    <span
+                      className={`text-[11px] font-medium shrink-0 ${
+                        item.difficulty === 'easy'
+                          ? 'text-emerald-400'
+                          : item.difficulty === 'hard'
+                          ? 'text-rose-400'
+                          : 'text-amber-400'
+                      }`}
+                    >
+                      {item.difficulty}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </aside>
+        </div>
+      )}
+
+      {/* LeetCode-style Top Workspace Header */}
+      <header className="h-12 px-3 sm:px-4 border-b border-neutral-800 bg-[#0d0d10] flex items-center justify-between gap-3 shrink-0">
+        {/* Left Zone: Brand + Problem List & Prev/Next/Shuffle */}
+        <div className="flex items-center gap-2 sm:gap-3 min-w-0">
           <button
             type="button"
             onClick={onGoHome}
@@ -475,270 +1029,526 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
           >
             PolyglotMesh
           </button>
-          <span className="text-neutral-700">/</span>
+
+          <span className="text-neutral-700 hidden sm:inline">/</span>
+
+          <div className="flex items-center rounded-md border border-neutral-800 bg-[#131317] p-0.5 shrink-0">
+            <button
+              type="button"
+              onClick={() => setDrawerOpen(true)}
+              className="inline-flex items-center gap-1.5 px-2 py-1 rounded text-xs font-medium text-neutral-200 hover:bg-neutral-800 transition-colors whitespace-nowrap"
+              title="Open problem list drawer"
+            >
+              <List className="w-3.5 h-3.5 text-neutral-400" />
+              <span className="hidden sm:inline">Problem List</span>
+            </button>
+            <button
+              type="button"
+              onClick={goPrevProblem}
+              disabled={!onSelectProblem || currentProblemIndex <= 0}
+              aria-label="Previous problem"
+              title="Previous problem"
+              className="p-1 rounded text-neutral-400 hover:text-white hover:bg-neutral-800 disabled:opacity-30 transition-colors"
+            >
+              <ChevronLeft className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={goNextProblem}
+              disabled={
+                !onSelectProblem ||
+                currentProblemIndex < 0 ||
+                currentProblemIndex >= problems.length - 1
+              }
+              aria-label="Next problem"
+              title="Next problem"
+              className="p-1 rounded text-neutral-400 hover:text-white hover:bg-neutral-800 disabled:opacity-30 transition-colors"
+            >
+              <ChevronRight className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={goRandomProblem}
+              disabled={!onSelectProblem}
+              aria-label="Random problem"
+              title="Pick random problem"
+              className="p-1 rounded text-neutral-400 hover:text-white hover:bg-neutral-800 disabled:opacity-30 transition-colors"
+            >
+              <Shuffle className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
           <button
             type="button"
             onClick={onBackToProblems}
-            className="inline-flex items-center gap-1.5 text-xs text-neutral-400 hover:text-white transition-colors whitespace-nowrap shrink-0"
+            className="hidden lg:inline-flex items-center gap-1 text-xs text-neutral-400 hover:text-white transition-colors whitespace-nowrap shrink-0"
           >
             <ArrowLeft className="w-3.5 h-3.5" />
-            <span>Problems</span>
+            <span>All Problems</span>
           </button>
         </div>
 
-        {/* Center/Right Action Buttons (Visualise / Debug, Mark Solved, Run, Submit) */}
-        <div className="flex items-center gap-2 shrink-0">
+        {/* Center Zone: Run / Submit / Visualise / Mark Solved */}
+        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
           <button
             type="button"
             onClick={() => runDebugTrace(code, false)}
             disabled={isDebugging}
-            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium border transition-colors whitespace-nowrap shrink-0 ${
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium border transition-colors whitespace-nowrap shrink-0 ${
               leftTab === 'visualiser'
                 ? 'bg-amber-500/20 border-amber-400 text-amber-200'
                 : 'bg-amber-950/30 border-amber-700/50 text-amber-300 hover:bg-amber-900/40'
             } disabled:opacity-50`}
           >
-            {isDebugging ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Eye className="w-3.5 h-3.5" />}
-            <span>Visualise</span>
+            {isDebugging ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <Eye className="w-3.5 h-3.5" />
+            )}
+            <span className="hidden md:inline">Visualise</span>
           </button>
+
+          <div className="inline-flex items-center rounded-md border border-neutral-800 bg-[#141418] p-0.5">
+            <button
+              type="button"
+              onClick={() => executeJudge(false)}
+              disabled={isRunning}
+              title="Run testcases (Ctrl+Enter)"
+              className="inline-flex items-center gap-1.5 px-3 py-1 rounded text-xs font-medium text-neutral-100 hover:bg-neutral-800 transition-colors disabled:opacity-50 whitespace-nowrap"
+            >
+              {isRunning && !judgeResult?.isSubmit ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-400" />
+              ) : (
+                <Play className="w-3.5 h-3.5 text-neutral-300" />
+              )}
+              <span>Run</span>
+            </button>
+            <div className="w-px h-4 bg-neutral-800" />
+            <button
+              type="button"
+              onClick={() => executeJudge(true)}
+              disabled={isRunning}
+              title="Submit solution (Ctrl+Shift+Enter)"
+              className="inline-flex items-center gap-1.5 px-3 py-1 rounded text-xs font-semibold text-emerald-400 hover:bg-emerald-500/15 transition-colors disabled:opacity-50 whitespace-nowrap"
+            >
+              {isRunning && judgeResult?.isSubmit ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Upload className="w-3.5 h-3.5" />
+              )}
+              <span>Submit</span>
+            </button>
+          </div>
 
           <button
             type="button"
             onClick={handleMarkSolvedToggle}
             aria-pressed={effectiveSolved}
-            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium border transition-colors whitespace-nowrap shrink-0 ${
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium border transition-colors whitespace-nowrap shrink-0 ${
               effectiveSolved
                 ? 'bg-emerald-500/15 border-emerald-500/50 text-emerald-300 hover:bg-emerald-500/25'
                 : 'bg-neutral-900 hover:bg-neutral-800 border-neutral-700 text-neutral-200'
             }`}
           >
             <CheckCircle2
-              className={`w-3.5 h-3.5 ${effectiveSolved ? 'text-emerald-400' : 'text-neutral-400'}`}
+              className={`w-3.5 h-3.5 ${
+                effectiveSolved ? 'text-emerald-400' : 'text-neutral-400'
+              }`}
             />
-            <span>{effectiveSolved ? 'Solved' : 'Mark solved'}</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => executeCode(false)}
-            disabled={isRunning}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-neutral-100 transition-colors disabled:opacity-50 whitespace-nowrap shrink-0"
-          >
-            {isRunning ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
-            <span>Run</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => executeCode(true)}
-            disabled={isRunning}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold bg-emerald-400 hover:bg-emerald-300 text-neutral-950 transition-colors disabled:opacity-50 whitespace-nowrap shrink-0"
-          >
-            <Upload className="w-3.5 h-3.5" />
-            <span>Submit</span>
+            <span className="hidden sm:inline">
+              {effectiveSolved ? 'Solved' : 'Mark solved'}
+            </span>
           </button>
         </div>
-      </header>
 
-      {/* Main Split Panels matching Photo 4's IDE layout */}
-      <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-2 p-2 min-h-[calc(100vh-48px)]">
-        {/* Left Pane: DESCRIPTION / VISUALISER / SOLUTIONS */}
-        <section className="lg:col-span-5 rounded-lg border border-neutral-800 bg-[#0b0b0e] flex flex-col overflow-hidden">
-          <div className="flex items-center gap-5 px-4 border-b border-neutral-800 bg-[#101014] text-[11px] font-semibold uppercase tracking-wider">
-            <button
-              type="button"
-              onClick={() => setLeftTab('description')}
-              className={`py-2.5 border-b-2 transition-colors ${
-                leftTab === 'description'
-                  ? 'border-white text-white'
-                  : 'border-transparent text-neutral-500 hover:text-neutral-300'
-              }`}
-            >
-              Description
-            </button>
+        {/* Right Zone: Focus Stopwatch Timer */}
+        <div className="hidden sm:flex items-center gap-1 shrink-0">
+          <button
+            type="button"
+            onClick={() => setTimerRunning((r) => !r)}
+            title={timerRunning ? 'Pause timer' : 'Start focus timer'}
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border text-xs font-mono tabular-nums transition-colors ${
+              timerRunning
+                ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+                : 'border-neutral-800 bg-[#131317] text-neutral-400 hover:text-neutral-200'
+            }`}
+          >
+            {timerRunning ? (
+              <Pause className="w-3 h-3" />
+            ) : (
+              <Clock className="w-3 h-3" />
+            )}
+            <span>{formatTimer(timerSeconds)}</span>
+          </button>
+          {timerSeconds > 0 && (
             <button
               type="button"
               onClick={() => {
-                setLeftTab('visualiser');
-                if (debugSteps.length === 0 || debugDirty) {
-                  runDebugTrace(code, false);
-                }
+                setTimerRunning(false);
+                setTimerSeconds(0);
               }}
-              className={`py-2.5 border-b-2 transition-colors ${
-                leftTab === 'visualiser'
-                  ? 'border-amber-400 text-amber-300'
-                  : 'border-transparent text-neutral-500 hover:text-neutral-300'
-              }`}
+              aria-label="Reset timer"
+              title="Reset timer"
+              className="p-1.5 rounded-md text-neutral-500 hover:text-neutral-200 hover:bg-neutral-800 transition-colors"
             >
-              Visualiser
+              <RotateCcw className="w-3 h-3" />
             </button>
-          </div>
+          )}
+        </div>
+      </header>
 
-          <div className="p-5 overflow-y-auto flex-1 space-y-5">
-            <div>
-              <h1 className="text-xl font-bold text-white">
-                {problem.leetcodeNumber ? `${problem.leetcodeNumber}. ` : ''}
-                {problem.title}
-              </h1>
-              <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs">
-                <span
-                  className={
-                    problem.difficulty === 'easy'
-                      ? 'text-emerald-400 font-medium'
-                      : problem.difficulty === 'hard'
-                      ? 'text-rose-400 font-medium'
-                      : 'text-amber-400 font-medium'
-                  }
+      {/* Main Split Workspace */}
+      <div
+        ref={workspaceRef}
+        className="flex-1 min-h-0 flex flex-col lg:flex-row p-2 gap-2 lg:gap-0 overflow-hidden"
+      >
+        {/* Left Pane: DESCRIPTION / NOTES / VISUALISER */}
+        {!editorMaximized && (
+          <section
+            style={{ ['--left-pane-w' as any]: `${leftWidthPct}%` }}
+            className="w-full lg:w-[var(--left-pane-w)] shrink-0 rounded-lg border border-neutral-800 bg-[#0b0b0e] flex flex-col overflow-hidden min-h-[260px] lg:min-h-0"
+          >
+            <div className="flex items-center justify-between px-4 border-b border-neutral-800 bg-[#101014]">
+              <div className="flex items-center gap-5 text-[11px] font-semibold uppercase tracking-wider">
+                <button
+                  type="button"
+                  onClick={() => setLeftTab('description')}
+                  className={`py-2.5 border-b-2 transition-colors whitespace-nowrap ${
+                    leftTab === 'description'
+                      ? 'border-white text-white'
+                      : 'border-transparent text-neutral-500 hover:text-neutral-300'
+                  }`}
                 >
-                  {problem.difficulty}
-                </span>
-                {problem.week && (
-                  <>
-                    <span className="text-neutral-600">·</span>
-                    <span className="text-neutral-400 font-mono">Week {problem.week}</span>
-                  </>
-                )}
-                <span className="text-neutral-600">·</span>
-                <span className="text-neutral-400">{problem.topics.join(', ')}</span>
+                  Description
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLeftTab('notes')}
+                  className={`py-2.5 border-b-2 transition-colors whitespace-nowrap ${
+                    leftTab === 'notes'
+                      ? 'border-white text-white'
+                      : 'border-transparent text-neutral-500 hover:text-neutral-300'
+                  }`}
+                >
+                  Notes
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLeftTab('visualiser');
+                    if (debugSteps.length === 0 || debugDirty) {
+                      runDebugTrace(code, false);
+                    }
+                  }}
+                  className={`py-2.5 border-b-2 transition-colors whitespace-nowrap ${
+                    leftTab === 'visualiser'
+                      ? 'border-amber-400 text-amber-300'
+                      : 'border-transparent text-neutral-500 hover:text-neutral-300'
+                  }`}
+                >
+                  Visualiser
+                </button>
               </div>
             </div>
 
-            {leftTab === 'description' && (
-              <div className="space-y-5">
-                <p className="font-editorial text-[15px] text-neutral-200 leading-relaxed">
-                  {problem.description}
-                </p>
-
-                <div className="space-y-3">
-                  {problem.examples.map((ex, idx) => (
-                    <div key={idx} className="space-y-2">
-                      <div className="text-xs font-semibold text-neutral-300">Example {idx + 1}:</div>
-                      <div className="p-3.5 rounded-lg border border-neutral-800 bg-[#09090b] font-mono text-xs text-neutral-300 space-y-1.5">
-                        <div>
-                          <span className="text-neutral-500">Input: </span>
-                          <span>{ex.input}</span>
-                        </div>
-                        <div>
-                          <span className="text-neutral-500">Output: </span>
-                          <span className="text-emerald-400">{ex.output}</span>
-                        </div>
-                        {ex.explanation && (
-                          <div className="text-neutral-400 pt-1">{ex.explanation}</div>
-                        )}
-                      </div>
-                    </div>
-                  ))}
+            <div className="p-5 overflow-y-auto flex-1 space-y-5">
+              <div>
+                <div className="flex items-start justify-between gap-3">
+                  <h1 className="text-xl font-bold text-white tracking-tight">
+                    {problem.leetcodeNumber ? `${problem.leetcodeNumber}. ` : ''}
+                    {problem.title}
+                  </h1>
+                  {effectiveSolved && (
+                    <span className="inline-flex items-center gap-1 text-xs font-medium text-emerald-400 shrink-0 pt-1">
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      Solved
+                    </span>
+                  )}
                 </div>
-              </div>
-            )}
 
-            {leftTab === 'visualiser' && (
-              <div className="space-y-4">
-                {problem.illustrationKey && problem.illustrationKey !== 'two-sum' && (
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setVisualiserMode('trace')}
-                      className={`px-3 py-1 rounded text-xs font-medium border transition-colors ${
-                        visualiserMode === 'trace'
-                          ? 'bg-amber-500/20 border-amber-500/60 text-amber-200'
-                          : 'bg-neutral-900 border-neutral-800 text-neutral-400 hover:text-white'
-                      }`}
-                    >
-                      Live Code Debugger
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setVisualiserMode('illustration')}
-                      className={`px-3 py-1 rounded text-xs font-medium border transition-colors ${
-                        visualiserMode === 'illustration'
-                          ? 'bg-emerald-500/20 border-emerald-500/60 text-emerald-200'
-                          : 'bg-neutral-900 border-neutral-800 text-neutral-400 hover:text-white'
-                      }`}
-                    >
-                      Algorithm Illustration
-                    </button>
+                <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+                  <span
+                    className={
+                      problem.difficulty === 'easy'
+                        ? 'text-emerald-400 font-medium capitalize'
+                        : problem.difficulty === 'hard'
+                        ? 'text-rose-400 font-medium capitalize'
+                        : 'text-amber-400 font-medium capitalize'
+                    }
+                  >
+                    {problem.difficulty}
+                  </span>
+                  {problem.week && (
+                    <>
+                      <span className="text-neutral-600">·</span>
+                      <span className="text-neutral-400 font-mono tabular-nums">
+                        Week {problem.week}
+                      </span>
+                    </>
+                  )}
+                  <span className="text-neutral-600">·</span>
+                  <button
+                    type="button"
+                    onClick={() => setTopicsOpen((o) => !o)}
+                    className="inline-flex items-center gap-1 text-neutral-400 hover:text-neutral-200 transition-colors"
+                  >
+                    <span>Topics ({problem.topics.length})</span>
+                    {topicsOpen ? (
+                      <ChevronUp className="w-3 h-3" />
+                    ) : (
+                      <ChevronDown className="w-3 h-3" />
+                    )}
+                  </button>
+                </div>
+
+                {topicsOpen && (
+                  <div className="mt-2 text-xs text-neutral-400 border-t border-neutral-800/70 pt-2">
+                    {problem.topics.join(' · ')}
                   </div>
                 )}
+              </div>
 
-                {visualiserMode === 'illustration' && problem.illustrationKey && problem.illustrationKey !== 'two-sum' ? (
-                  <div className="rounded-xl border border-neutral-800 bg-[#09090b] p-4">
-                    {renderProblemIllustration()}
+              {leftTab === 'description' && (
+                <div className="space-y-5">
+                  <p className="font-editorial text-[15px] text-neutral-200 leading-relaxed">
+                    {problem.description}
+                  </p>
+
+                  <div className="space-y-3">
+                    {problem.examples.map((ex, idx) => (
+                      <div key={idx} className="space-y-2">
+                        <div className="text-xs font-semibold text-neutral-300">
+                          Example {idx + 1}:
+                        </div>
+                        <div className="p-3.5 rounded-lg border border-neutral-800 bg-[#09090b] font-mono text-xs text-neutral-300 space-y-1.5">
+                          <div>
+                            <span className="text-neutral-500">Input: </span>
+                            <span>{ex.input}</span>
+                          </div>
+                          <div>
+                            <span className="text-neutral-500">Output: </span>
+                            <span className="text-emerald-400">{ex.output}</span>
+                          </div>
+                          {ex.explanation && (
+                            <div className="text-neutral-400 pt-1">
+                              <span className="text-neutral-500">
+                                Explanation:{' '}
+                              </span>
+                              {ex.explanation}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ))}
                   </div>
-                ) : (
-                  <div className="rounded-xl border border-neutral-800 bg-[#09090b] overflow-hidden flex flex-col">
-                    <div className="flex flex-wrap items-center justify-between gap-2 px-3.5 py-2 border-b border-neutral-800 bg-neutral-950">
+
+                  <div className="space-y-2 pt-2 border-t border-neutral-800/80">
+                    <div className="text-xs font-semibold text-neutral-300">
+                      Constraints:
+                    </div>
+                    <ul className="space-y-1.5 font-mono text-xs text-neutral-400 list-disc list-inside">
+                      {leetcodeSpec.constraints.map((c, idx) => (
+                        <li key={idx}>{c}</li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+              )}
+
+              {leftTab === 'notes' && (
+                <div className="flex flex-col h-full gap-3">
+                  <div className="flex items-center justify-between text-xs text-neutral-400">
+                    <span>
+                      Personal notes for this problem (auto-saved locally)
+                    </span>
+                    {noteText && (
                       <button
                         type="button"
-                        onClick={() => runDebugTrace(code, false)}
-                        disabled={isDebugging}
-                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-semibold bg-amber-950/50 border border-amber-600/50 text-amber-300 hover:bg-amber-900/50 transition-colors disabled:opacity-50"
+                        onClick={() => setNoteText('')}
+                        className="text-neutral-500 hover:text-neutral-200 transition-colors"
                       >
-                        {isDebugging ? <Loader2 className="w-3 h-3 animate-spin" /> : <Bug className="w-3 h-3" />}
-                        <span>{debugDirty ? 'Re-Debug Code' : 'Debug Code'}</span>
+                        Clear note
                       </button>
+                    )}
+                  </div>
+                  <textarea
+                    value={noteText}
+                    onChange={(e) => setNoteText(e.target.value)}
+                    placeholder="Jot down your time/space complexity ideas, edge cases, or approach notes..."
+                    className="w-full min-h-[240px] flex-1 rounded-lg border border-neutral-800 bg-[#09090b] p-3.5 text-xs font-mono text-neutral-200 placeholder-neutral-600 focus:outline-none focus:border-emerald-500 resize-none leading-relaxed"
+                  />
+                </div>
+              )}
 
-                      <PlaybackBar
-                        compact
-                        currentIndex={Math.min(debugStepIndex, Math.max(0, debugSteps.length - 1))}
-                        totalSteps={Math.max(1, debugSteps.length)}
-                        isPlaying={isPlayingDebug}
-                        onTogglePlay={() => {
-                          if (debugDirty || debugSteps.length === 0) {
-                            runDebugTrace(code, true);
-                            return;
-                          }
-                          if (!isPlayingDebug && debugStepIndex >= debugSteps.length - 1) {
+              {leftTab === 'visualiser' && (
+                <div className="space-y-4">
+                  {problem.illustrationKey &&
+                    problem.illustrationKey !== 'two-sum' && (
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setVisualiserMode('trace')}
+                          className={`px-3 py-1 rounded text-xs font-medium border transition-colors ${
+                            visualiserMode === 'trace'
+                              ? 'bg-amber-500/20 border-amber-500/60 text-amber-200'
+                              : 'bg-neutral-900 border-neutral-800 text-neutral-400 hover:text-white'
+                          }`}
+                        >
+                          Live Code Debugger
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setVisualiserMode('illustration')}
+                          className={`px-3 py-1 rounded text-xs font-medium border transition-colors ${
+                            visualiserMode === 'illustration'
+                              ? 'bg-emerald-500/20 border-emerald-500/60 text-emerald-200'
+                              : 'bg-neutral-900 border-neutral-800 text-neutral-400 hover:text-white'
+                          }`}
+                        >
+                          Algorithm Illustration
+                        </button>
+                      </div>
+                    )}
+
+                  {visualiserMode === 'illustration' &&
+                  problem.illustrationKey &&
+                  problem.illustrationKey !== 'two-sum' ? (
+                    <div className="rounded-xl border border-neutral-800 bg-[#09090b] p-4">
+                      {renderProblemIllustration()}
+                    </div>
+                  ) : (
+                    <div className="rounded-xl border border-neutral-800 bg-[#09090b] overflow-hidden flex flex-col">
+                      <div className="flex flex-wrap items-center justify-between gap-2 px-3.5 py-2 border-b border-neutral-800 bg-neutral-950">
+                        <button
+                          type="button"
+                          onClick={() => runDebugTrace(code, false)}
+                          disabled={isDebugging}
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-semibold bg-amber-950/50 border border-amber-600/50 text-amber-300 hover:bg-amber-900/50 transition-colors disabled:opacity-50"
+                        >
+                          {isDebugging ? (
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                          ) : (
+                            <Bug className="w-3 h-3" />
+                          )}
+                          <span>
+                            {debugDirty ? 'Re-Debug Code' : 'Debug Code'}
+                          </span>
+                        </button>
+
+                        <PlaybackBar
+                          compact
+                          currentIndex={Math.min(
+                            debugStepIndex,
+                            Math.max(0, debugSteps.length - 1)
+                          )}
+                          totalSteps={Math.max(1, debugSteps.length)}
+                          isPlaying={isPlayingDebug}
+                          onTogglePlay={() => {
+                            if (debugDirty || debugSteps.length === 0) {
+                              runDebugTrace(code, true);
+                              return;
+                            }
+                            if (
+                              !isPlayingDebug &&
+                              debugStepIndex >= debugSteps.length - 1
+                            ) {
+                              setDebugStepIndex(0);
+                            }
+                            setIsPlayingDebug((p) => !p);
+                          }}
+                          onFirst={() => {
+                            setIsPlayingDebug(false);
                             setDebugStepIndex(0);
-                          }
-                          setIsPlayingDebug(p => !p);
-                        }}
-                        onFirst={() => { setIsPlayingDebug(false); setDebugStepIndex(0); }}
-                        onPrev={() => { setIsPlayingDebug(false); setDebugStepIndex(s => Math.max(0, s - 1)); }}
-                        onNext={() => {
-                          setIsPlayingDebug(false);
-                          if (debugDirty || debugSteps.length === 0) {
-                            runDebugTrace(code, false);
-                          } else {
-                            setDebugStepIndex(s => Math.min(Math.max(0, debugSteps.length - 1), s + 1));
-                          }
-                        }}
-                        onLast={() => { setIsPlayingDebug(false); setDebugStepIndex(Math.max(0, debugSteps.length - 1)); }}
+                          }}
+                          onPrev={() => {
+                            setIsPlayingDebug(false);
+                            setDebugStepIndex((s) => Math.max(0, s - 1));
+                          }}
+                          onNext={() => {
+                            setIsPlayingDebug(false);
+                            if (debugDirty || debugSteps.length === 0) {
+                              runDebugTrace(code, false);
+                            } else {
+                              setDebugStepIndex((s) =>
+                                Math.min(
+                                  Math.max(0, debugSteps.length - 1),
+                                  s + 1
+                                )
+                              );
+                            }
+                          }}
+                          onLast={() => {
+                            setIsPlayingDebug(false);
+                            setDebugStepIndex(
+                              Math.max(0, debugSteps.length - 1)
+                            );
+                          }}
+                        />
+                      </div>
+
+                      <LiveMemoryVisualiser
+                        compact
+                        steps={debugSteps}
+                        stepIndex={debugStepIndex}
+                        syntaxError={debugSyntaxError || syntaxErrors[0] || null}
+                        runtimeError={debugRuntimeError}
+                        isDebugging={isDebugging}
+                        truncated={debugTruncated}
+                        onJumpToLine={jumpToLine}
                       />
                     </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </section>
+        )}
 
-                    <LiveMemoryVisualiser
-                      compact
-                      steps={debugSteps}
-                      stepIndex={debugStepIndex}
-                      syntaxError={debugSyntaxError || syntaxErrors[0] || null}
-                      runtimeError={debugRuntimeError}
-                      isDebugging={isDebugging}
-                      truncated={debugTruncated}
-                      onJumpToLine={jumpToLine}
-                    />
-                  </div>
-                )}
-              </div>
-            )}
+        {/* Horizontal Drag Resizer */}
+        {!editorMaximized && (
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize description and editor panes"
+            onMouseDown={startHorizontalResize}
+            className="hidden lg:flex w-2 shrink-0 cursor-col-resize items-center justify-center group"
+          >
+            <div className="w-0.5 h-10 rounded-full bg-neutral-800 group-hover:bg-emerald-400 transition-colors" />
           </div>
-        </section>
+        )}
 
-        {/* Right Pane: CODE EDITOR (Top) + TEST CASES / RESULT (Bottom) */}
-        <section className="lg:col-span-7 flex flex-col gap-2 min-h-[540px]">
-          <div className="flex-1 rounded-lg border border-neutral-800 bg-[#0b0b0e] flex flex-col overflow-hidden min-h-[340px]">
-            <div className="flex items-center justify-between px-4 py-2 border-b border-neutral-800 bg-[#101014] text-xs">
-              <div className="flex items-center gap-3">
-                <span className="text-[11px] font-semibold uppercase tracking-wider text-neutral-400">Code</span>
+        {/* Right Pane: CODE EDITOR (Top) + TESTCASE / TEST RESULT (Bottom) */}
+        <section
+          ref={rightPaneRef}
+          className="flex-1 min-w-0 flex flex-col min-h-0"
+        >
+          {/* Code Editor Panel */}
+          <div className="flex-1 rounded-lg border border-neutral-800 bg-[#0b0b0e] flex flex-col overflow-hidden min-h-[220px] relative">
+            {/* LeetCode Editor Toolbar */}
+            <div className="flex flex-wrap items-center justify-between gap-2 px-3.5 py-2 border-b border-neutral-800 bg-[#101014] text-xs">
+              <div className="flex items-center gap-2">
                 <select
                   aria-label="Editor Language"
                   value={lang}
-                  onChange={(e) => setLang(e.target.value as 'python' | 'javascript')}
-                  className="bg-neutral-900 border border-neutral-800 rounded px-2 py-1 text-xs text-neutral-200 focus:outline-none focus:border-emerald-500 cursor-pointer"
+                  onChange={(e) =>
+                    setLang(e.target.value as 'python' | 'javascript')
+                  }
+                  className="bg-neutral-900 border border-neutral-800 rounded px-2.5 py-1 text-xs font-medium text-neutral-100 focus:outline-none focus:border-emerald-500 cursor-pointer"
                 >
-                  <option value="python">Python</option>
+                  <option value="python">Python 3</option>
                   <option value="javascript">JavaScript</option>
                 </select>
+
+                <button
+                  type="button"
+                  onClick={insertSignatureStub}
+                  title="Insert empty LeetCode Solution signature (no solution logic)"
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded border border-neutral-800 bg-neutral-900 hover:bg-neutral-800 text-[11px] font-medium text-neutral-300 hover:text-white transition-colors whitespace-nowrap"
+                >
+                  <Code2 className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Insert Stub</span>
+                </button>
+
                 {code.length > 0 && (
                   <button
                     type="button"
@@ -751,7 +1561,7 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
                       setDebugRuntimeError(null);
                       setEditorMarkers(null, null);
                     }}
-                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-neutral-800 text-[11px] text-neutral-400 hover:text-white hover:bg-neutral-900 transition-colors"
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded border border-neutral-800 text-[11px] text-neutral-400 hover:text-white hover:bg-neutral-900 transition-colors whitespace-nowrap"
                     title="Clear code editor"
                   >
                     <RotateCcw className="w-3 h-3" />
@@ -760,45 +1570,201 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
                 )}
               </div>
 
-              {(() => {
-                const liveErr = debugSyntaxError || syntaxErrors[0] || null;
-                if (liveErr) {
-                  return (
-                    <button
-                      type="button"
-                      onClick={() => jumpToLine(liveErr.line)}
-                      className="text-[11px] text-rose-400 hover:text-rose-300 font-mono font-semibold"
-                    >
-                      SyntaxError @ Line {liveErr.line}
-                    </button>
-                  );
-                }
-                if (debugRuntimeError) {
-                  return (
-                    <button
-                      type="button"
-                      onClick={() => jumpToLine(debugRuntimeError.line)}
-                      className="text-[11px] text-rose-400 hover:text-rose-300 font-mono font-semibold"
-                    >
-                      {debugRuntimeError.type} @ Line {debugRuntimeError.line}
-                    </button>
-                  );
-                }
-                if (debugDirty) {
-                  return <span className="text-[11px] text-amber-400 font-mono">Checking live...</span>;
-                }
-                if (!code.trim()) {
-                  return (
-                    <span className="text-[11px] text-neutral-500 font-mono">
-                      Write your {lang === 'python' ? 'Python' : 'JavaScript'} solution
-                    </span>
-                  );
-                }
-                return <span className="text-[11px] text-emerald-400/90 font-mono">No errors</span>;
-              })()}
+              <div className="flex items-center gap-2">
+                {(() => {
+                  const liveErr = debugSyntaxError || syntaxErrors[0] || null;
+                  if (liveErr) {
+                    return (
+                      <button
+                        type="button"
+                        onClick={() => jumpToLine(liveErr.line)}
+                        className="text-[11px] text-rose-400 hover:text-rose-300 font-mono font-semibold whitespace-nowrap"
+                      >
+                        SyntaxError @ Line {liveErr.line}
+                      </button>
+                    );
+                  }
+                  if (debugRuntimeError) {
+                    return (
+                      <button
+                        type="button"
+                        onClick={() => jumpToLine(debugRuntimeError.line)}
+                        className="text-[11px] text-rose-400 hover:text-rose-300 font-mono font-semibold whitespace-nowrap"
+                      >
+                        {debugRuntimeError.type} @ Line {debugRuntimeError.line}
+                      </button>
+                    );
+                  }
+                  if (debugDirty) {
+                    return (
+                      <span className="text-[11px] text-amber-400 font-mono whitespace-nowrap">
+                        Checking...
+                      </span>
+                    );
+                  }
+                  if (code.trim()) {
+                    return (
+                      <span className="text-[11px] text-emerald-400/90 font-mono whitespace-nowrap">
+                        No errors
+                      </span>
+                    );
+                  }
+                  return null;
+                })()}
+
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setSettingsOpen((s) => !s)}
+                    aria-label="Editor settings"
+                    title="Editor settings"
+                    className={`p-1.5 rounded border transition-colors ${
+                      settingsOpen
+                        ? 'border-neutral-600 bg-neutral-800 text-white'
+                        : 'border-transparent text-neutral-400 hover:text-white hover:bg-neutral-800/70'
+                    }`}
+                  >
+                    <Settings2 className="w-3.5 h-3.5" />
+                  </button>
+
+                  {settingsOpen && (
+                    <div className="absolute right-0 top-9 z-40 w-60 rounded-lg border border-neutral-800 bg-[#121216] p-3.5 space-y-3 shadow-xl">
+                      <div className="flex items-center justify-between text-xs font-semibold text-white">
+                        <span>Editor Settings</span>
+                        <button
+                          type="button"
+                          onClick={() => setSettingsOpen(false)}
+                          className="text-neutral-400 hover:text-white"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="text-neutral-400">Font Size</span>
+                        <select
+                          value={editorPrefs.fontSize}
+                          onChange={(e) =>
+                            setEditorPrefs((p) => ({
+                              ...p,
+                              fontSize: Number(e.target.value)
+                            }))
+                          }
+                          className="bg-neutral-900 border border-neutral-800 rounded px-2 py-0.5 text-xs text-neutral-200 tabular-nums"
+                        >
+                          {[12, 13, 14, 15, 16].map((sz) => (
+                            <option key={sz} value={sz}>
+                              {sz}px
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="text-neutral-400">Tab Size</span>
+                        <div className="inline-flex rounded border border-neutral-800 bg-neutral-900 p-0.5">
+                          {([2, 4] as const).map((ts) => (
+                            <button
+                              key={ts}
+                              type="button"
+                              onClick={() =>
+                                setEditorPrefs((p) => ({ ...p, tabSize: ts }))
+                              }
+                              className={`px-2 py-0.5 rounded text-[11px] tabular-nums ${
+                                editorPrefs.tabSize === ts
+                                  ? 'bg-neutral-700 text-white'
+                                  : 'text-neutral-400'
+                              }`}
+                            >
+                              {ts}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="text-neutral-400">Word Wrap</span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setEditorPrefs((p) => ({
+                              ...p,
+                              wordWrap: p.wordWrap === 'on' ? 'off' : 'on'
+                            }))
+                          }
+                          className={`px-2 py-0.5 rounded border text-[11px] ${
+                            editorPrefs.wordWrap === 'on'
+                              ? 'border-emerald-500/50 bg-emerald-500/15 text-emerald-300'
+                              : 'border-neutral-800 bg-neutral-900 text-neutral-400'
+                          }`}
+                        >
+                          {editorPrefs.wordWrap === 'on' ? 'On' : 'Off'}
+                        </button>
+                      </div>
+
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="text-neutral-400">Autocomplete</span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setEditorPrefs((p) => ({
+                              ...p,
+                              autocomplete: !p.autocomplete
+                            }))
+                          }
+                          className={`px-2 py-0.5 rounded border text-[11px] ${
+                            editorPrefs.autocomplete
+                              ? 'border-emerald-500/50 bg-emerald-500/15 text-emerald-300'
+                              : 'border-neutral-800 bg-neutral-900 text-neutral-400'
+                          }`}
+                        >
+                          {editorPrefs.autocomplete ? 'On' : 'Off'}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setEditorMaximized((m) => !m)}
+                  aria-label={editorMaximized ? 'Restore layout' : 'Maximize editor'}
+                  title={editorMaximized ? 'Restore layout' : 'Maximize editor'}
+                  className="p-1.5 rounded text-neutral-400 hover:text-white hover:bg-neutral-800/70 transition-colors"
+                >
+                  {editorMaximized ? (
+                    <Minimize2 className="w-3.5 h-3.5" />
+                  ) : (
+                    <Maximize2 className="w-3.5 h-3.5" />
+                  )}
+                </button>
+              </div>
             </div>
 
-            <div className="flex-1 min-h-[280px]">
+            {/* Subtle LeetCode Method Signature Hint Strip when Editor is Empty */}
+            {!code.trim() && (
+              <div className="px-4 py-2 border-b border-neutral-800/60 bg-[#0d0d11] flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                <span className="font-mono text-neutral-400 truncate">
+                  Target:{' '}
+                  <span className="text-neutral-200">
+                    {leetcodeSpec.isDesignClass
+                      ? `class ${leetcodeSpec.methodName}`
+                      : `Solution.${leetcodeSpec.methodName}(${leetcodeSpec.params
+                          .map((p) => p.name)
+                          .join(', ')})`}
+                  </span>
+                </span>
+                <button
+                  type="button"
+                  onClick={insertSignatureStub}
+                  className="font-medium text-emerald-400 hover:text-emerald-300 transition-colors whitespace-nowrap"
+                >
+                  Insert empty signature
+                </button>
+              </div>
+            )}
+
+            <div className="flex-1 min-h-0">
               <Editor
                 height="100%"
                 language={lang}
@@ -815,121 +1781,353 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
                 options={{
                   minimap: { enabled: false },
                   glyphMargin: true,
-                  fontSize: 13,
-                  lineHeight: 21,
+                  fontSize: editorPrefs.fontSize,
+                  lineHeight: Math.round(editorPrefs.fontSize * 1.6),
                   fontFamily: "'JetBrains Mono', monospace",
                   scrollBeyondLastLine: false,
                   automaticLayout: true,
-                  tabSize: lang === 'python' ? 4 : 2,
+                  tabSize: editorPrefs.tabSize,
+                  insertSpaces: true,
+                  wordWrap: editorPrefs.wordWrap,
+                  autoClosingBrackets: 'always',
+                  autoClosingQuotes: 'always',
+                  autoIndent: 'full',
+                  formatOnType: true,
+                  matchBrackets: 'always',
+                  bracketPairColorization: { enabled: true },
+                  quickSuggestions: editorPrefs.autocomplete,
+                  suggestOnTriggerCharacters: editorPrefs.autocomplete,
                   padding: { top: 12, bottom: 12 }
                 }}
               />
             </div>
 
-            {(debugSyntaxError || syntaxErrors[0] || debugRuntimeError) && (() => {
-              const syn = debugSyntaxError || syntaxErrors[0] || null;
-              const errLabel = syn ? 'SyntaxError' : debugRuntimeError!.type;
-              const errLine = syn ? syn.line : debugRuntimeError!.line;
-              const errCol = syn ? syn.column : undefined;
-              const errMsg = syn ? syn.message : debugRuntimeError!.message;
-              return (
-                <div className="px-4 py-2 border-t border-rose-500/40 bg-rose-950/35 flex items-start justify-between gap-3 text-xs font-mono">
-                  <div className="flex items-start gap-2 text-rose-200 min-w-0">
-                    <XCircle className="w-3.5 h-3.5 text-rose-400 shrink-0 mt-0.5" />
-                    <span className="break-words">
-                      <strong className="text-rose-300">
-                        {errLabel} (Line {errLine}
-                        {errCol ? `:${errCol}` : ''}):
-                      </strong>{' '}
-                      {errMsg}
-                    </span>
+            {(debugSyntaxError || syntaxErrors[0] || debugRuntimeError) &&
+              (() => {
+                const syn = debugSyntaxError || syntaxErrors[0] || null;
+                const errLabel = syn ? 'SyntaxError' : debugRuntimeError!.type;
+                const errLine = syn ? syn.line : debugRuntimeError!.line;
+                const errCol = syn ? syn.column : undefined;
+                const errMsg = syn ? syn.message : debugRuntimeError!.message;
+                return (
+                  <div className="px-4 py-2 border-t border-rose-500/40 bg-rose-950/35 flex items-start justify-between gap-3 text-xs font-mono">
+                    <div className="flex items-start gap-2 text-rose-200 min-w-0">
+                      <XCircle className="w-3.5 h-3.5 text-rose-400 shrink-0 mt-0.5" />
+                      <span className="break-words">
+                        <strong className="text-rose-300">
+                          {errLabel} (Line {errLine}
+                          {errCol ? `:${errCol}` : ''}):
+                        </strong>{' '}
+                        {errMsg}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => jumpToLine(errLine)}
+                      className="px-2 py-0.5 rounded border border-rose-500/40 bg-rose-950/60 hover:bg-rose-900/60 text-[11px] text-rose-200 shrink-0 transition-colors"
+                    >
+                      Line {errLine}
+                    </button>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => jumpToLine(errLine)}
-                    className="px-2 py-0.5 rounded border border-rose-500/40 bg-rose-950/60 hover:bg-rose-900/60 text-[11px] text-rose-200 shrink-0 transition-colors"
-                  >
-                    Line {errLine}
-                  </button>
-                </div>
-              );
-            })()}
+                );
+              })()}
+
+            {/* Editor Bottom Status Bar (Saved draft · Shortcuts · Cursor Ln/Col) */}
+            <div className="h-7 px-3.5 border-t border-neutral-800/80 bg-[#0d0d10] flex items-center justify-between text-[11px] font-mono text-neutral-500">
+              <div className="flex items-center gap-3">
+                <span>{code.trim() ? 'Draft saved' : 'Empty'}</span>
+                <span className="hidden sm:inline text-neutral-700">·</span>
+                <span className="hidden sm:inline">
+                  Ctrl+Enter Run · Ctrl+Shift+Enter Submit
+                </span>
+              </div>
+              <span className="tabular-nums">
+                Ln {cursorPos.line}, Col {cursorPos.column}
+              </span>
+            </div>
           </div>
 
-          {/* Bottom Test Cases / Test Result Panel */}
-          <div className="h-48 rounded-lg border border-neutral-800 bg-[#0b0b0e] flex flex-col overflow-hidden">
-            <div className="flex items-center gap-5 px-4 border-b border-neutral-800 bg-[#101014] text-[11px] font-semibold uppercase tracking-wider">
+          {/* Vertical Drag Resizer */}
+          <div
+            role="separator"
+            aria-orientation="horizontal"
+            aria-label="Resize code editor and testcase console"
+            onMouseDown={startVerticalResize}
+            className="h-2 shrink-0 cursor-row-resize flex items-center justify-center group"
+          >
+            <div className="h-0.5 w-12 rounded-full bg-neutral-800 group-hover:bg-emerald-400 transition-colors" />
+          </div>
+
+          {/* Bottom Testcase / Test Result Panel */}
+          <div
+            style={{
+              height: consoleCollapsed ? '38px' : `${consoleHeightPx}px`
+            }}
+            className="shrink-0 rounded-lg border border-neutral-800 bg-[#0b0b0e] flex flex-col overflow-hidden transition-[height] duration-75"
+          >
+            <div className="h-[38px] px-4 border-b border-neutral-800 bg-[#101014] flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-5 text-[11px] font-semibold uppercase tracking-wider">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setBottomTab('cases');
+                    setConsoleCollapsed(false);
+                  }}
+                  className={`py-2.5 border-b-2 transition-colors whitespace-nowrap ${
+                    bottomTab === 'cases'
+                      ? 'border-white text-white'
+                      : 'border-transparent text-neutral-500 hover:text-neutral-300'
+                  }`}
+                >
+                  Testcase
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setBottomTab('result');
+                    setConsoleCollapsed(false);
+                  }}
+                  className={`py-2.5 border-b-2 transition-colors whitespace-nowrap inline-flex items-center gap-1.5 ${
+                    bottomTab === 'result'
+                      ? 'border-white text-white'
+                      : 'border-transparent text-neutral-500 hover:text-neutral-300'
+                  }`}
+                >
+                  <span>Test Result</span>
+                  {judgeResult && (
+                    <span
+                      className={`w-1.5 h-1.5 rounded-full ${
+                        judgeResult.verdict === 'Accepted'
+                          ? 'bg-emerald-400'
+                          : 'bg-rose-400'
+                      }`}
+                    />
+                  )}
+                </button>
+              </div>
+
               <button
                 type="button"
-                onClick={() => setBottomTab('cases')}
-                className={`py-2 border-b-2 transition-colors ${
-                  bottomTab === 'cases' ? 'border-white text-white' : 'border-transparent text-neutral-500 hover:text-neutral-300'
-                }`}
+                onClick={() => setConsoleCollapsed((c) => !c)}
+                aria-label={
+                  consoleCollapsed ? 'Expand console' : 'Collapse console'
+                }
+                className="p-1 rounded text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors"
               >
-                Test Cases
-              </button>
-              <button
-                type="button"
-                onClick={() => setBottomTab('result')}
-                className={`py-2 border-b-2 transition-colors ${
-                  bottomTab === 'result' ? 'border-white text-white' : 'border-transparent text-neutral-500 hover:text-neutral-300'
-                }`}
-              >
-                Test Result
+                {consoleCollapsed ? (
+                  <ChevronUp className="w-3.5 h-3.5" />
+                ) : (
+                  <ChevronDown className="w-3.5 h-3.5" />
+                )}
               </button>
             </div>
 
-            <div className="p-4 flex-1 overflow-y-auto font-mono text-xs">
-              {bottomTab === 'cases' ? (
-                <div className="space-y-2 text-neutral-300">
-                  <div>
-                    <span className="text-neutral-500">Input: </span>
-                    {problem.examples[0]?.input}
-                  </div>
-                  <div>
-                    <span className="text-neutral-500">Expected Output: </span>
-                    <span className="text-emerald-400">{problem.examples[0]?.output}</span>
-                  </div>
-                </div>
-              ) : isRunning ? (
-                <div className="flex items-center gap-2 text-neutral-400">
-                  <Loader2 className="w-4 h-4 animate-spin text-emerald-400" />
-                  <span>Running inside PolyglotMesh sandbox...</span>
-                </div>
-              ) : result ? (
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      {result.success && submissionStatus !== 'failed' ? (
-                        <span className="inline-flex items-center gap-1.5 text-emerald-400 font-semibold">
-                          <CheckCircle2 className="w-4 h-4" />
-                          <span>{submissionStatus === 'passed' ? 'Accepted' : 'Executed cleanly'}</span>
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1.5 text-rose-400 font-semibold">
-                          <XCircle className="w-4 h-4" />
-                          <span>{submissionStatus === 'failed' ? 'Wrong Answer / Failed' : 'Execution Error'}</span>
-                        </span>
-                      )}
+            {!consoleCollapsed && (
+              <div className="p-4 flex-1 overflow-y-auto font-mono text-xs">
+                {bottomTab === 'cases' ? (
+                  <div className="space-y-3">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {testCases.map((tc, idx) => (
+                        <div
+                          key={tc.id}
+                          className={`inline-flex items-center rounded-md border transition-colors ${
+                            idx === activeCaseIdx
+                              ? 'bg-neutral-800 border-neutral-600 text-white'
+                              : 'bg-[#121216] border-neutral-800 text-neutral-400 hover:text-neutral-200'
+                          }`}
+                        >
+                          <button
+                            type="button"
+                            onClick={() => setActiveCaseIdx(idx)}
+                            className="px-2.5 py-1 text-[11px] font-medium whitespace-nowrap"
+                          >
+                            {tc.label}
+                          </button>
+                          {testCases.length > 1 && tc.isCustom && (
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveCase(idx)}
+                              aria-label={`Remove ${tc.label}`}
+                              className="pr-1.5 text-neutral-500 hover:text-rose-400"
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                      <button
+                        type="button"
+                        onClick={handleAddCustomCase}
+                        aria-label="Add custom testcase"
+                        title="Add custom testcase"
+                        className="p-1 rounded-md border border-neutral-800 bg-[#121216] text-neutral-400 hover:text-white hover:border-neutral-600 transition-colors"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                      </button>
                     </div>
-                    <span className="text-neutral-500 tabular-nums">{result.executionTimeMs} ms</span>
-                  </div>
 
-                  {result.output && (
-                    <pre className="p-2.5 rounded bg-[#09090b] border border-neutral-800 text-neutral-200 whitespace-pre-wrap">
-                      {result.output}
-                    </pre>
-                  )}
-                  {result.error && (
-                    <pre className="p-2.5 rounded bg-rose-950/30 border border-rose-900/60 text-rose-300 whitespace-pre-wrap">
-                      {result.error}
-                    </pre>
-                  )}
-                </div>
-              ) : (
-                <div className="text-neutral-500">Click Run or Submit to execute your code.</div>
-              )}
-            </div>
+                    {activeCase && (
+                      <div className="space-y-2.5">
+                        {activeCase.inputs.map((inp, inpIdx) => (
+                          <div key={inpIdx} className="space-y-1">
+                            <label className="block text-[11px] text-neutral-400">
+                              {inp.name} =
+                            </label>
+                            <input
+                              type="text"
+                              value={inp.value}
+                              onChange={(e) =>
+                                handleCaseInputChange(
+                                  activeCaseIdx,
+                                  inpIdx,
+                                  e.target.value
+                                )
+                              }
+                              className="w-full rounded-md border border-neutral-800 bg-[#121216] px-3 py-1.5 text-xs text-neutral-100 focus:outline-none focus:border-emerald-500"
+                            />
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ) : isRunning ? (
+                  <div className="flex items-center gap-2 text-neutral-400">
+                    <Loader2 className="w-4 h-4 animate-spin text-emerald-400" />
+                    <span>Running testcases inside PolyglotMesh judge...</span>
+                  </div>
+                ) : judgeResult ? (
+                  <div className="space-y-3">
+                    {/* LeetCode Verdict Banner */}
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2.5">
+                        {judgeResult.verdict === 'Accepted' ? (
+                          <span className="inline-flex items-center gap-1.5 text-sm font-bold text-emerald-400 font-sans">
+                            <CheckCircle2 className="w-4 h-4" />
+                            <span>Accepted</span>
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1.5 text-sm font-bold text-rose-400 font-sans">
+                            <XCircle className="w-4 h-4" />
+                            <span>{judgeResult.verdict}</span>
+                          </span>
+                        )}
+                        <span className="text-neutral-500 tabular-nums">
+                          {judgeResult.passedCount} / {judgeResult.totalCount}{' '}
+                          testcases passed
+                        </span>
+                      </div>
+                      <span className="text-neutral-400 tabular-nums">
+                        Runtime: {judgeResult.runtimeMs} ms
+                      </span>
+                    </div>
+
+                    {/* Top-level Compile / Runtime Error Box */}
+                    {judgeResult.errorMessage && (
+                      <div className="p-3 rounded-md bg-rose-950/30 border border-rose-900/60 text-rose-300 flex items-start justify-between gap-3">
+                        <pre className="whitespace-pre-wrap break-words">
+                          {judgeResult.errorMessage}
+                        </pre>
+                        {judgeResult.errorLine && (
+                          <button
+                            type="button"
+                            onClick={() => jumpToLine(judgeResult.errorLine!)}
+                            className="px-2 py-0.5 rounded border border-rose-500/40 bg-rose-950/60 hover:bg-rose-900/60 text-[11px] text-rose-200 shrink-0"
+                          >
+                            Line {judgeResult.errorLine}
+                          </button>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Per-Case Verdict Tabs */}
+                    {judgeResult.cases.length > 0 && (
+                      <>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {judgeResult.cases.map((c, idx) => (
+                            <button
+                              key={c.id}
+                              type="button"
+                              onClick={() => setActiveResultCaseIdx(idx)}
+                              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border text-[11px] font-medium transition-colors ${
+                                idx === activeResultCaseIdx
+                                  ? 'bg-neutral-800 border-neutral-600 text-white'
+                                  : 'bg-[#121216] border-neutral-800 text-neutral-400 hover:text-neutral-200'
+                              }`}
+                            >
+                              <span
+                                className={`w-1.5 h-1.5 rounded-full ${
+                                  c.passed ? 'bg-emerald-400' : 'bg-rose-400'
+                                }`}
+                              />
+                              <span>{c.label}</span>
+                            </button>
+                          ))}
+                        </div>
+
+                        {activeResultCase && (
+                          <div className="space-y-2.5">
+                            <div className="space-y-1">
+                              <div className="text-[11px] text-neutral-500">
+                                Input
+                              </div>
+                              <pre className="p-2.5 rounded-md bg-[#121216] border border-neutral-800/80 text-neutral-200 whitespace-pre-wrap">
+                                {activeResultCase.inputDisplay}
+                              </pre>
+                            </div>
+
+                            {activeResultCase.stdout && (
+                              <div className="space-y-1">
+                                <div className="text-[11px] text-neutral-500">
+                                  Stdout
+                                </div>
+                                <pre className="p-2.5 rounded-md bg-[#121216] border border-neutral-800/80 text-neutral-300 whitespace-pre-wrap">
+                                  {activeResultCase.stdout}
+                                </pre>
+                              </div>
+                            )}
+
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                              <div className="space-y-1">
+                                <div className="text-[11px] text-neutral-500">
+                                  Output
+                                </div>
+                                <pre
+                                  className={`p-2.5 rounded-md border whitespace-pre-wrap ${
+                                    activeResultCase.passed
+                                      ? 'bg-[#121216] border-neutral-800/80 text-emerald-300'
+                                      : 'bg-rose-950/20 border-rose-900/50 text-rose-300'
+                                  }`}
+                                >
+                                  {activeResultCase.actualOutput ||
+                                    activeResultCase.error ||
+                                    '(none)'}
+                                </pre>
+                              </div>
+
+                              <div className="space-y-1">
+                                <div className="text-[11px] text-neutral-500">
+                                  Expected
+                                </div>
+                                <pre className="p-2.5 rounded-md bg-[#121216] border border-neutral-800/80 text-emerald-400 whitespace-pre-wrap">
+                                  {activeResultCase.expectedOutput}
+                                </pre>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                ) : (
+                  <div className="text-neutral-500">
+                    You must run your code first. Press{' '}
+                    <span className="text-neutral-300">Run</span> (Ctrl+Enter)
+                    or <span className="text-neutral-300">Submit</span>{' '}
+                    (Ctrl+Shift+Enter).
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </section>
       </div>

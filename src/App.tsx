@@ -124,8 +124,11 @@ export default function App() {
     return (
       <ProblemSolverView
         problem={selectedProblem}
+        problems={ALGORITHM_PROBLEMS}
+        solvedIds={solvedIds}
         initialLanguage={solverLang}
         isSolved={solvedIds.includes(selectedProblem.id)}
+        onSelectProblem={(p) => openProblemInSolver(p, solverLang)}
         onBackToProblems={() => setAppMode('problems')}
         onGoHome={() => {
           setAppMode('home');

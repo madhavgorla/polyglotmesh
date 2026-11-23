@@ -1,0 +1,222 @@
+let completionsRegistered = false;
+
+export function configureLeetCodeMonaco(monaco: any) {
+  monaco.editor.defineTheme('ntree-obsidian', {
+    base: 'vs-dark',
+    inherit: true,
+    rules: [
+      { token: 'comment', foreground: '6b7280', fontStyle: 'italic' },
+      { token: 'keyword', foreground: '60a5fa', fontStyle: 'bold' },
+      { token: 'type', foreground: 'fbbf24' },
+      { token: 'string', foreground: '34d399' },
+      { token: 'number', foreground: 'fbbf24' },
+      { token: 'delimiter.bracket', foreground: 'a1a1aa' }
+    ],
+    colors: {
+      'editor.background': '#0b0b0e',
+      'editor.foreground': '#e5e7eb',
+      'editorCursor.foreground': '#34d399',
+      'editor.lineHighlightBackground': '#18181b99',
+      'editor.selectionBackground': '#2563eb44',
+      'editor.inactiveSelectionBackground': '#27272a66',
+      'editorLineNumber.foreground': '#52525b',
+      'editorLineNumber.activeForeground': '#e4e4e7',
+      'editorGutter.background': '#0b0b0e',
+      'editorIndentGuide.background1': '#27272a',
+      'editorIndentGuide.activeBackground1': '#3f3f46',
+      'editorBracketMatch.background': '#34d39926',
+      'editorBracketMatch.border': '#34d39988'
+    }
+  });
+  monaco.editor.setTheme('ntree-obsidian');
+
+  if (completionsRegistered) return;
+  completionsRegistered = true;
+
+  const Kind = monaco.languages.CompletionItemKind;
+  const InsertAsSnippet = monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet;
+
+  monaco.languages.registerCompletionItemProvider('python', {
+    provideCompletionItems: (model: any, position: any) => {
+      const word = model.getWordUntilPosition(position);
+      const range = {
+        startLineNumber: position.lineNumber,
+        endLineNumber: position.lineNumber,
+        startColumn: word.startColumn,
+        endColumn: word.endColumn
+      };
+
+      const suggestions = [
+        {
+          label: 'def',
+          kind: Kind.Snippet,
+          insertText: 'def ${1:name}(self, ${2:args}) -> ${3:None}:\n    ${4:pass}',
+          insertTextRules: InsertAsSnippet,
+          documentation: 'Define a Solution method',
+          range
+        },
+        {
+          label: 'fori',
+          kind: Kind.Snippet,
+          insertText: 'for ${1:i} in range(${2:len(nums)}):\n    ${3}',
+          insertTextRules: InsertAsSnippet,
+          documentation: 'Index loop over range',
+          range
+        },
+        {
+          label: 'forenum',
+          kind: Kind.Snippet,
+          insertText: 'for ${1:i}, ${2:val} in enumerate(${3:nums}):\n    ${4}',
+          insertTextRules: InsertAsSnippet,
+          documentation: 'Enumerate index and element',
+          range
+        },
+        {
+          label: 'deque',
+          kind: Kind.Class,
+          insertText: 'deque(${1})',
+          insertTextRules: InsertAsSnippet,
+          documentation: 'collections.deque (pre-imported)',
+          range
+        },
+        {
+          label: 'defaultdict',
+          kind: Kind.Class,
+          insertText: 'defaultdict(${1:list})',
+          insertTextRules: InsertAsSnippet,
+          documentation: 'collections.defaultdict (pre-imported)',
+          range
+        },
+        {
+          label: 'Counter',
+          kind: Kind.Class,
+          insertText: 'Counter(${1:items})',
+          insertTextRules: InsertAsSnippet,
+          documentation: 'collections.Counter (pre-imported)',
+          range
+        },
+        {
+          label: 'heapq.heappush',
+          kind: Kind.Function,
+          insertText: 'heapq.heappush(${1:heap}, ${2:item})',
+          insertTextRules: InsertAsSnippet,
+          documentation: 'Push item onto min-heap',
+          range
+        },
+        {
+          label: 'heapq.heappop',
+          kind: Kind.Function,
+          insertText: 'heapq.heappop(${1:heap})',
+          insertTextRules: InsertAsSnippet,
+          documentation: 'Pop smallest item from min-heap',
+          range
+        },
+        {
+          label: 'bisect.bisect_left',
+          kind: Kind.Function,
+          insertText: 'bisect.bisect_left(${1:arr}, ${2:target})',
+          insertTextRules: InsertAsSnippet,
+          documentation: 'Binary search leftmost insertion index',
+          range
+        },
+        {
+          label: 'float("inf")',
+          kind: Kind.Constant,
+          insertText: 'float("inf")',
+          documentation: 'Positive infinity',
+          range
+        },
+        {
+          label: 'List',
+          kind: Kind.TypeParameter,
+          insertText: 'List[${1:int}]',
+          insertTextRules: InsertAsSnippet,
+          documentation: 'typing.List (pre-imported)',
+          range
+        },
+        {
+          label: 'Optional',
+          kind: Kind.TypeParameter,
+          insertText: 'Optional[${1:int}]',
+          insertTextRules: InsertAsSnippet,
+          documentation: 'typing.Optional (pre-imported)',
+          range
+        }
+      ];
+
+      return { suggestions };
+    }
+  });
+
+  monaco.languages.registerCompletionItemProvider('javascript', {
+    provideCompletionItems: (model: any, position: any) => {
+      const word = model.getWordUntilPosition(position);
+      const range = {
+        startLineNumber: position.lineNumber,
+        endLineNumber: position.lineNumber,
+        startColumn: word.startColumn,
+        endColumn: word.endColumn
+      };
+
+      const suggestions = [
+        {
+          label: 'fori',
+          kind: Kind.Snippet,
+          insertText: 'for (let ${1:i} = 0; ${1:i} < ${2:nums}.length; ${1:i}++) {\n    ${3}\n}',
+          insertTextRules: InsertAsSnippet,
+          documentation: 'Standard indexed for loop',
+          range
+        },
+        {
+          label: 'forof',
+          kind: Kind.Snippet,
+          insertText: 'for (const ${1:item} of ${2:items}) {\n    ${3}\n}',
+          insertTextRules: InsertAsSnippet,
+          documentation: 'for..of loop',
+          range
+        },
+        {
+          label: 'new Map',
+          kind: Kind.Class,
+          insertText: 'new Map()',
+          documentation: 'ES6 Hash Map',
+          range
+        },
+        {
+          label: 'new Set',
+          kind: Kind.Class,
+          insertText: 'new Set(${1})',
+          insertTextRules: InsertAsSnippet,
+          documentation: 'ES6 Hash Set',
+          range
+        },
+        {
+          label: 'Array.from',
+          kind: Kind.Function,
+          insertText: 'Array.from({ length: ${1:n} }, () => ${2:0})',
+          insertTextRules: InsertAsSnippet,
+          documentation: 'Create initialized array of length n',
+          range
+        },
+        {
+          label: 'Math.max',
+          kind: Kind.Function,
+          insertText: 'Math.max(${1:a}, ${2:b})',
+          insertTextRules: InsertAsSnippet,
+          documentation: 'Maximum of numbers',
+          range
+        },
+        {
+          label: 'Math.min',
+          kind: Kind.Function,
+          insertText: 'Math.min(${1:a}, ${2:b})',
+          insertTextRules: InsertAsSnippet,
+          documentation: 'Minimum of numbers',
+          range
+        }
+      ];
+
+      return { suggestions };
+    }
+  });
+}
