@@ -1,8 +1,15 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { VisualiserWorkspaceView } from './components/VisualiserWorkspaceView';
 import { ProblemsExplorerView } from './components/visualizer/ProblemsExplorerView';
 import { ProblemSolverView } from './components/visualizer/ProblemSolverView';
+import { DailyStreakCounter } from './components/visualizer/DailyStreakCounter';
 import { ALGORITHM_PROBLEMS, AlgorithmProblem } from './data/visualizerProblems';
+import {
+  computeStreakFromDates,
+  extractDatesFromTimestamps,
+  readStoredDailyStreak,
+  saveDailyStreak,
+} from './utils/dailyStreak';
 
 type AppMode = 'home' | 'problems' | 'solve';
 
@@ -42,6 +49,19 @@ export default function App() {
   const [solverLang, setSolverLang] = useState<'python' | 'javascript'>('python');
   const [solvedIds, setSolvedIds] = useState<string[]>(readStoredSolvedIds);
   const [solveTimestamps, setSolveTimestamps] = useState<Record<string, string>>(readStoredTimestamps);
+  const [storedStreakDates, setStoredStreakDates] = useState<string[]>(
+    () => readStoredDailyStreak().solvedDates
+  );
+
+  const dailyStreak = useMemo(() => {
+    const fromTimestamps = extractDatesFromTimestamps(solveTimestamps);
+    const merged = Array.from(new Set([...storedStreakDates, ...fromTimestamps]));
+    return computeStreakFromDates(merged);
+  }, [solveTimestamps, storedStreakDates]);
+
+  useEffect(() => {
+    saveDailyStreak(dailyStreak);
+  }, [dailyStreak]);
 
   useEffect(() => {
     try {
@@ -65,6 +85,7 @@ export default function App() {
   };
 
   const handleToggleSolved = (id: string) => {
+    const wasSolved = solvedIds.includes(id);
     setSolvedIds((prev) => {
       const exists = prev.includes(id);
       if (exists) {
@@ -73,9 +94,11 @@ export default function App() {
       return [...prev, id];
     });
     setSolveTimestamps((prev) => {
-      if (prev[id]) {
+      if (wasSolved || prev[id]) {
         const next = { ...prev };
         delete next[id];
+        const remainingDates = extractDatesFromTimestamps(next);
+        setStoredStreakDates(remainingDates);
         return next;
       }
       return { ...prev, [id]: new Date().toISOString() };
@@ -85,6 +108,7 @@ export default function App() {
   const handleResetProgress = () => {
     setSolvedIds([]);
     setSolveTimestamps({});
+    setStoredStreakDates([]);
   };
 
   const openProblemInSolver = (
@@ -108,6 +132,7 @@ export default function App() {
       <ProblemsExplorerView
         solvedIds={solvedIds}
         solveTimestamps={solveTimestamps}
+        dailyStreak={dailyStreak}
         onToggleSolved={handleToggleSolved}
         onResetProgress={handleResetProgress}
         onSelectProblem={(problem) => openProblemInSolver(problem, 'python')}
@@ -126,6 +151,7 @@ export default function App() {
         problem={selectedProblem}
         problems={ALGORITHM_PROBLEMS}
         solvedIds={solvedIds}
+        dailyStreak={dailyStreak}
         initialLanguage={solverLang}
         isSolved={solvedIds.includes(selectedProblem.id)}
         onSelectProblem={(p) => openProblemInSolver(p, solverLang)}
@@ -185,13 +211,19 @@ export default function App() {
             </button>
           </nav>
 
-          <button
-            type="button"
-            onClick={() => setAppMode('problems')}
-            className="px-4 py-2 rounded-lg bg-emerald-400 hover:bg-emerald-300 text-neutral-950 font-semibold text-xs transition-colors whitespace-nowrap shrink-0"
-          >
-            Solve problems
-          </button>
+          <div className="flex items-center gap-3 shrink-0">
+            <DailyStreakCounter
+              streak={dailyStreak}
+              onOpenProblems={() => setAppMode('problems')}
+            />
+            <button
+              type="button"
+              onClick={() => setAppMode('problems')}
+              className="px-4 py-2 rounded-lg bg-emerald-400 hover:bg-emerald-300 text-neutral-950 font-semibold text-xs transition-colors whitespace-nowrap shrink-0"
+            >
+              Solve problems
+            </button>
+          </div>
         </div>
       </header>
 

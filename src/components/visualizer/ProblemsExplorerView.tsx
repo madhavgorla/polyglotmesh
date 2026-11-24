@@ -2,12 +2,15 @@ import React, { useState, useMemo } from 'react';
 import { PanelLeftClose, PanelLeftOpen, Layers, Grid2X2, Search, Check } from 'lucide-react';
 import { ALGORITHM_PROBLEMS, ALL_TOPICS, AlgorithmProblem } from '../../data/visualizerProblems';
 import { UserProgressDashboard } from './UserProgressDashboard';
+import { DailyStreakCounter } from './DailyStreakCounter';
+import { DailyStreakState, readStoredDailyStreak } from '../../utils/dailyStreak';
 
 interface ProblemsExplorerViewProps {
   onSelectProblem: (problem: AlgorithmProblem) => void;
   onGoHome: () => void;
   solvedIds: string[];
   solveTimestamps?: Record<string, string>;
+  dailyStreak?: DailyStreakState;
   onToggleSolved?: (problemId: string) => void;
   onResetProgress?: () => void;
 }
@@ -17,6 +20,7 @@ export const ProblemsExplorerView: React.FC<ProblemsExplorerViewProps> = ({
   onGoHome,
   solvedIds,
   solveTimestamps = {},
+  dailyStreak,
   onToggleSolved,
   onResetProgress,
 }) => {
@@ -132,11 +136,14 @@ export const ProblemsExplorerView: React.FC<ProblemsExplorerViewProps> = ({
       <main className="flex-1 min-w-0 px-6 sm:px-10 lg:px-14 py-8 max-w-[1160px]">
         <div className="space-y-6">
           <div className="flex flex-wrap items-center justify-between gap-4">
-            <div className="flex items-baseline gap-3">
-              <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-white">Problems</h1>
-              <span className="text-xs font-mono text-neutral-500 tabular-nums">
-                {filteredProblems.length} / {ALGORITHM_PROBLEMS.length}
-              </span>
+            <div className="flex items-center gap-3">
+              <div className="flex items-baseline gap-3">
+                <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-white">Problems</h1>
+                <span className="text-xs font-mono text-neutral-500 tabular-nums">
+                  {filteredProblems.length} / {ALGORITHM_PROBLEMS.length}
+                </span>
+              </div>
+              <DailyStreakCounter streak={dailyStreak ?? readStoredDailyStreak()} />
             </div>
 
             {/* Search + Week + Difficulty Filter Controls */}

@@ -44,7 +44,9 @@ import {
 import { LiveMemoryVisualiser } from './LiveMemoryVisualiser';
 import { PlaybackBar } from './PlaybackBar';
 import { ConfettiBurst } from './ConfettiBurst';
+import { DailyStreakCounter } from './DailyStreakCounter';
 import { configureLeetCodeMonaco } from './monacoLeetCodeSetup';
+import { DailyStreakState, readStoredDailyStreak } from '../../utils/dailyStreak';
 import { DebugResponse, DebugStep, SupportedLanguage } from '../../types';
 
 interface JudgeCaseResult {
@@ -85,6 +87,7 @@ interface ProblemSolverViewProps {
   problem: AlgorithmProblem;
   problems?: AlgorithmProblem[];
   solvedIds?: string[];
+  dailyStreak?: DailyStreakState;
   initialLanguage?: 'python' | 'javascript';
   isSolved?: boolean;
   onSelectProblem?: (problem: AlgorithmProblem) => void;
@@ -172,6 +175,7 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
   problem,
   problems = ALGORITHM_PROBLEMS,
   solvedIds = [],
+  dailyStreak,
   initialLanguage = 'python',
   isSolved,
   onSelectProblem,
@@ -1161,39 +1165,45 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
           </button>
         </div>
 
-        {/* Right Zone: Focus Stopwatch Timer */}
-        <div className="hidden sm:flex items-center gap-1 shrink-0">
-          <button
-            type="button"
-            onClick={() => setTimerRunning((r) => !r)}
-            title={timerRunning ? 'Pause timer' : 'Start focus timer'}
-            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border text-xs font-mono tabular-nums transition-colors ${
-              timerRunning
-                ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
-                : 'border-neutral-800 bg-[#131317] text-neutral-400 hover:text-neutral-200'
-            }`}
-          >
-            {timerRunning ? (
-              <Pause className="w-3 h-3" />
-            ) : (
-              <Clock className="w-3 h-3" />
-            )}
-            <span>{formatTimer(timerSeconds)}</span>
-          </button>
-          {timerSeconds > 0 && (
+        {/* Right Zone: Daily Streak & Focus Stopwatch Timer */}
+        <div className="flex items-center gap-2 shrink-0">
+          <DailyStreakCounter
+            streak={dailyStreak ?? readStoredDailyStreak()}
+            onOpenProblems={onBackToProblems}
+          />
+          <div className="hidden sm:flex items-center gap-1 shrink-0">
             <button
               type="button"
-              onClick={() => {
-                setTimerRunning(false);
-                setTimerSeconds(0);
-              }}
-              aria-label="Reset timer"
-              title="Reset timer"
-              className="p-1.5 rounded-md text-neutral-500 hover:text-neutral-200 hover:bg-neutral-800 transition-colors"
+              onClick={() => setTimerRunning((r) => !r)}
+              title={timerRunning ? 'Pause timer' : 'Start focus timer'}
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border text-xs font-mono tabular-nums transition-colors ${
+                timerRunning
+                  ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+                  : 'border-neutral-800 bg-[#131317] text-neutral-400 hover:text-neutral-200'
+              }`}
             >
-              <RotateCcw className="w-3 h-3" />
+              {timerRunning ? (
+                <Pause className="w-3 h-3" />
+              ) : (
+                <Clock className="w-3 h-3" />
+              )}
+              <span>{formatTimer(timerSeconds)}</span>
             </button>
-          )}
+            {timerSeconds > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  setTimerRunning(false);
+                  setTimerSeconds(0);
+                }}
+                aria-label="Reset timer"
+                title="Reset timer"
+                className="p-1.5 rounded-md text-neutral-500 hover:text-neutral-200 hover:bg-neutral-800 transition-colors"
+              >
+                <RotateCcw className="w-3 h-3" />
+              </button>
+            )}
+          </div>
         </div>
       </header>
 
