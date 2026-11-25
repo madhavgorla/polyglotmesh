@@ -3,12 +3,12 @@ import { Play, Eye, Upload, Code2 } from 'lucide-react';
 import { TwoSumVisualizer } from './visualizer/TwoSumVisualizer';
 import { AlgorithmIllustrations } from './visualizer/AlgorithmIllustrations';
 import { ALGORITHM_PROBLEMS, AlgorithmProblem } from '../data/visualizerProblems';
-import { SupportedLanguage } from '../types';
+import { SolverLanguage, SupportedLanguage } from '../types';
 
 interface VisualiserWorkspaceViewProps {
   onTryRandomProblem: () => void;
   onExploreProblems: () => void;
-  onOpenProblem: (problem: AlgorithmProblem, language?: 'python' | 'javascript', initialTab?: 'description' | 'visualiser') => void;
+  onOpenProblem: (problem: AlgorithmProblem, language?: SolverLanguage, initialTab?: 'description' | 'visualiser') => void;
 }
 
 const LCA_PREVIEW_LINES = [
@@ -42,7 +42,8 @@ export const VisualiserWorkspaceView: React.FC<VisualiserWorkspaceViewProps> = (
     const found =
       ALGORITHM_PROBLEMS.find(p => p.title.toLowerCase() === title.toLowerCase()) ||
       ALGORITHM_PROBLEMS[0];
-    onOpenProblem(found, lang === 'javascript' ? 'javascript' : 'python', 'description');
+    const solverLang: SolverLanguage = lang === 'ruby' ? 'python' : lang;
+    onOpenProblem(found, solverLang, 'description');
   };
 
   return (

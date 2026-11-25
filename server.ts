@@ -6,6 +6,14 @@ import { spawn, execSync } from 'child_process';
 import vm from 'vm';
 import fs from 'fs';
 import * as acorn from 'acorn';
+import {
+  EXTRA_RUNTIMES,
+  auditExtraLanguageSecurity,
+  checkPolyglotSyntax,
+  executeStandaloneNativeScript,
+  judgeCompiledLanguage,
+  transpileTypeScript
+} from './serverPolyglot';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -27,11 +35,15 @@ function checkCommandAvailable(cmd: string): boolean {
 
 const RUNTIME_AVAILABILITY = {
   javascript: true, // Isolated Node.js VM runtime
+  typescript: EXTRA_RUNTIMES.typescript,
   python: checkCommandAvailable('python3'),
+  java: EXTRA_RUNTIMES.java,
+  c: EXTRA_RUNTIMES.c,
+  cpp: EXTRA_RUNTIMES.cpp,
   ruby: checkCommandAvailable('ruby')
 };
 
-type SupportedLanguage = 'python' | 'javascript' | 'ruby';
+type SupportedLanguage = 'python' | 'javascript' | 'typescript' | 'java' | 'c' | 'cpp' | 'ruby';
 
 interface SavedScript {
   id: string;
@@ -231,7 +243,7 @@ function auditCodeSecurity(language: string, code: string): { dangerous: boolean
     }
   }
 
-  return { dangerous: false };
+  return auditExtraLanguageSecurity(language, code);
 }
 
 function recordHistory(
@@ -268,9 +280,17 @@ app.post('/api/check-syntax', async (req: Request, res: Response) => {
     return res.json({ valid: true, errors: [] });
   }
 
-  const normalizedLang = language.trim().toLowerCase();
+  let normalizedLang = language.trim().toLowerCase();
+  if (normalizedLang === 'js') normalizedLang = 'javascript';
+  if (normalizedLang === 'ts') normalizedLang = 'typescript';
+  if (normalizedLang === 'c++') normalizedLang = 'cpp';
 
-  if (normalizedLang === 'javascript' || normalizedLang === 'js') {
+  if (normalizedLang === 'typescript' || normalizedLang === 'java' || normalizedLang === 'c' || normalizedLang === 'cpp') {
+    const check = await checkPolyglotSyntax(normalizedLang, code);
+    return res.json(check);
+  }
+
+  if (normalizedLang === 'javascript') {
     try {
       acorn.parse(code, { ecmaVersion: 'latest', sourceType: 'script', locations: true });
       new vm.Script(code);
@@ -605,11 +625,13 @@ app.post('/api/debug', async (req: Request, res: Response) => {
 
   let normalizedLang = language.trim().toLowerCase();
   if (normalizedLang === 'js') normalizedLang = 'javascript';
+  if (normalizedLang === 'ts') normalizedLang = 'typescript';
+  if (normalizedLang === 'c++') normalizedLang = 'cpp';
 
-  if (normalizedLang !== 'python' && normalizedLang !== 'javascript') {
+  if (!['python', 'javascript', 'typescript', 'java', 'c', 'cpp'].includes(normalizedLang)) {
     return res.status(400).json({
       success: false,
-      error: `Step debugger supports "python" and "javascript" (received "${language}").`,
+      error: `Step debugger supports python, javascript, typescript, java, c, and cpp (received "${language}").`,
       steps: [],
       executionTimeMs: 0
     });
@@ -653,9 +675,118 @@ app.post('/api/debug', async (req: Request, res: Response) => {
 
   const deadline = Math.min(Math.max(Number(timeoutMs) || 3000, 500), 5000);
 
-  if (normalizedLang === 'javascript') {
+  if (normalizedLang === 'java' || normalizedLang === 'c' || normalizedLang === 'cpp') {
+    const syntax = await checkPolyglotSyntax(normalizedLang, code);
+    if (!syntax.valid && syntax.errors.length > 0) {
+      const err = syntax.errors[0];
+      return res.json({
+        success: false,
+        language: normalizedLang,
+        steps: [
+          {
+            step: 1,
+            line: err.line,
+            event: 'exception',
+            functionName: '<compile>',
+            locals: {},
+            stack: [{ functionName: '<compile>', line: err.line, locals: {} }],
+            stdout: '',
+            error: { type: 'CompileError', message: err.message, line: err.line, column: err.column },
+            caption: `CompileError on line ${err.line}: ${err.message}`
+          }
+        ],
+        syntaxError: { line: err.line, column: err.column, message: err.message },
+        runtimeError: null,
+        finalOutput: '',
+        executionTimeMs: Date.now() - startTime
+      });
+    }
+
+    const hasMain =
+      normalizedLang === 'java'
+        ? /\bpublic\s+static\s+void\s+main\s*\(/.test(code)
+        : /\bint\s+main\s*\(/.test(code);
+    if (hasMain) {
+      const execRes = await executeStandaloneNativeScript(normalizedLang, code, deadline);
+      return res.json({
+        success: execRes.success,
+        language: normalizedLang,
+        steps: [
+          {
+            step: 1,
+            line: 1,
+            event: execRes.success ? 'complete' : 'exception',
+            functionName: 'main',
+            locals: { runtime: execRes.engine },
+            stack: [{ functionName: 'main', line: 1, locals: { runtime: execRes.engine } }],
+            stdout: execRes.output,
+            error: execRes.error ? { type: 'RuntimeError', message: execRes.error, line: 1 } : null,
+            caption: execRes.error || `${execRes.engine} execution finished`
+          }
+        ],
+        syntaxError: null,
+        runtimeError: execRes.error ? { type: 'RuntimeError', message: execRes.error, line: 1 } : null,
+        finalOutput: execRes.output,
+        executionTimeMs: Date.now() - startTime
+      });
+    }
+
+    return res.json({
+      success: true,
+      language: normalizedLang,
+      steps: [
+        {
+          step: 1,
+          line: 1,
+          event: 'complete',
+          functionName: 'Solution',
+          locals: { status: 'Compiled cleanly (0 errors)' },
+          stack: [{ functionName: 'Solution', line: 1, locals: { status: 'Compiled cleanly' } }],
+          stdout: '',
+          error: null,
+          caption: 'Compilation passed — use Run or Submit to execute against testcases'
+        }
+      ],
+      syntaxError: null,
+      runtimeError: null,
+      finalOutput: '',
+      executionTimeMs: Date.now() - startTime
+    });
+  }
+
+  let debugSourceCode = code;
+  if (normalizedLang === 'typescript') {
+    const tsOut = transpileTypeScript(code);
+    if (!tsOut.ok || !tsOut.jsCode) {
+      const err = tsOut.error || { line: 1, column: 1, message: 'TypeScript syntax error' };
+      return res.json({
+        success: false,
+        language: 'typescript',
+        steps: [
+          {
+            step: 1,
+            line: err.line,
+            event: 'exception',
+            functionName: '<module>',
+            locals: {},
+            stack: [{ functionName: '<module>', line: err.line, locals: {} }],
+            stdout: '',
+            error: { type: 'SyntaxError', message: err.message, line: err.line, column: err.column },
+            caption: `SyntaxError on line ${err.line}: ${err.message}`
+          }
+        ],
+        syntaxError: err,
+        runtimeError: null,
+        finalOutput: '',
+        executionTimeMs: Date.now() - startTime
+      });
+    }
+    debugSourceCode = tsOut.jsCode;
+  }
+
+  if (normalizedLang === 'javascript' || normalizedLang === 'typescript') {
     try {
-      acorn.parse(code, { ecmaVersion: 'latest', sourceType: 'script', locations: true });
+      acorn.parse(debugSourceCode, { ecmaVersion: 'latest', sourceType: 'script', locations: true });
     } catch (err: any) {
       const line = err.loc?.line || 1;
       const column = typeof err.loc?.column === 'number' ? err.loc.column + 1 : 1;
@@ -684,7 +815,7 @@ app.post('/api/debug', async (req: Request, res: Response) => {
     }
 
     try {
-      const instrumented = instrumentJavaScriptForDebug(code);
+      const instrumented = instrumentJavaScriptForDebug(debugSourceCode);
       const logs: string[] = [];
       const steps: any[] = [];
       const callStack: Array<{ functionName: string; line: number; locals: Record<string, any> }> = [
@@ -795,6 +926,52 @@ app.post('/api/debug', async (req: Request, res: Response) => {
         parseFloat,
         isNaN,
         isFinite,
+        ListNode: class ListNode {
+          val: any;
+          next: any;
+          constructor(val = 0, next: any = null) {
+            this.val = val;
+            this.next = next;
+          }
+        },
+        TreeNode: class TreeNode {
+          val: any;
+          left: any;
+          right: any;
+          constructor(val = 0, left: any = null, right: any = null) {
+            this.val = val;
+            this.left = left;
+            this.right = right;
+          }
+        },
+        __arrayToListNode: (arr: any) => {
+          if (!Array.isArray(arr) || arr.length === 0) return null;
+          let head: any = null;
+          for (let i = arr.length - 1; i >= 0; i -= 1) {
+            head = new (sandbox.ListNode)(arr[i], head);
+          }
+          return head;
+        },
+        __arrayToTreeNode: (arr: any) => {
+          if (!Array.isArray(arr) || arr.length === 0 || arr[0] === null) return null;
+          const root = new (sandbox.TreeNode)(arr[0]);
+          const q: any[] = [root];
+          let idx = 1;
+          while (q.length > 0 && idx < arr.length) {
+            const node = q.shift();
+            if (idx < arr.length && arr[idx] !== null && arr[idx] !== undefined) {
+              node.left = new (sandbox.TreeNode)(arr[idx]);
+              q.push(node.left);
+            }
+            idx += 1;
+            if (idx < arr.length && arr[idx] !== null && arr[idx] !== undefined) {
+              node.right = new (sandbox.TreeNode)(arr[idx]);
+              q.push(node.right);
+            }
+            idx += 1;
+          }
+          return root;
+        },
         __safeVal: safeVal,
         __enter: (line: number, fnName: string, snapFn: () => Record<string, any>) => {
           const locals = snapFn();
@@ -894,7 +1071,48 @@ app.post('/api/debug', async (req: Request, res: Response) => {
   }
 
   const pyDebugHarness = `
-import ast, io, json, sys, traceback
+import ast, io, json, sys, traceback, math, heapq, bisect, collections
+from collections import defaultdict, deque, Counter
+from typing import List, Dict, Set, Tuple, Optional, Any, Callable
+
+class ListNode:
+    def __init__(self, val=0, next=None):
+        self.val = val
+        self.next = next
+
+class TreeNode:
+    def __init__(self, val=0, left=None, right=None):
+        self.val = val
+        self.left = left
+        self.right = right
+
+def __array_to_list_node(arr):
+    if not isinstance(arr, list) or len(arr) == 0:
+        return None
+    dummy = ListNode(0)
+    curr = dummy
+    for v in arr:
+        curr.next = ListNode(v)
+        curr = curr.next
+    return dummy.next
+
+def __array_to_tree_node(arr):
+    if not isinstance(arr, list) or len(arr) == 0 or arr[0] is None:
+        return None
+    root = TreeNode(arr[0])
+    q = deque([root])
+    idx = 1
+    while q and idx < len(arr):
+        node = q.popleft()
+        if idx < len(arr) and arr[idx] is not None:
+            node.left = TreeNode(arr[idx])
+            q.append(node.left)
+        idx += 1
+        if idx < len(arr) and arr[idx] is not None:
+            node.right = TreeNode(arr[idx])
+            q.append(node.right)
+        idx += 1
+    return root
 
 user_code = sys.stdin.read()
 
@@ -1054,7 +1272,16 @@ def tracer(frame, event, arg):
 runtime_err = None
 try:
     compiled = compile(user_code, "<user_code>", "exec")
-    ns = {"__name__": "__main__"}
+    ns = {
+        "__name__": "__main__",
+        "List": List, "Dict": Dict, "Set": Set, "Tuple": Tuple,
+        "Optional": Optional, "Any": Any, "Callable": Callable,
+        "defaultdict": defaultdict, "deque": deque, "Counter": Counter,
+        "math": math, "heapq": heapq, "bisect": bisect, "collections": collections,
+        "ListNode": ListNode, "TreeNode": TreeNode,
+        "__array_to_list_node": __array_to_list_node,
+        "__array_to_tree_node": __array_to_tree_node,
+    }
     sys.settrace(tracer)
     exec(compiled, ns, ns)
 except TraceLimitReached:
@@ -1190,14 +1417,16 @@ app.post('/api/execute', async (req: Request, res: Response) => {
 
   let normalizedLang = language.trim().toLowerCase();
   if (normalizedLang === 'js') normalizedLang = 'javascript';
+  if (normalizedLang === 'ts') normalizedLang = 'typescript';
+  if (normalizedLang === 'c++') normalizedLang = 'cpp';
 
-  if (normalizedLang !== 'python' && normalizedLang !== 'javascript' && normalizedLang !== 'ruby') {
+  if (!['python', 'javascript', 'typescript', 'java', 'c', 'cpp', 'ruby'].includes(normalizedLang)) {
     return res.status(400).json({
       success: false,
       executionId,
       language: normalizedLang,
       output: '',
-      error: `Unsupported language "${language}". Supported language identifiers are: "javascript", "python", "ruby".`,
+      error: `Unsupported language "${language}". Supported: javascript, typescript, python, java, c, cpp, ruby.`,
       executionTimeMs: 0
     });
   }
@@ -1282,7 +1511,42 @@ app.post('/api/execute', async (req: Request, res: Response) => {
   const deadline = Math.min(Math.max(Number(timeoutMs) || 3000, 500), 5000);
 
   try {
-    if (normalizedLang === 'javascript') {
+    if (normalizedLang === 'java' || normalizedLang === 'c' || normalizedLang === 'cpp') {
+      const execRes = await executeStandaloneNativeScript(normalizedLang, code, deadline);
+      const elapsed = Date.now() - startTime;
+      recordHistory(executionId, normalizedLang, code, execRes.output, execRes.error, elapsed, execRes.success, execRes.engine);
+      return res.json({
+        success: execRes.success,
+        executionId,
+        language: normalizedLang,
+        output: execRes.output,
+        error: execRes.error,
+        executionTimeMs: elapsed,
+        engine: execRes.engine
+      });
+    }
+
+    let execJsCode = code;
+    if (normalizedLang === 'typescript') {
+      const tsOut = transpileTypeScript(code);
+      if (!tsOut.ok || !tsOut.jsCode) {
+        const elapsed = Date.now() - startTime;
+        const errMsg = `CompileError (Line ${tsOut.error?.line || 1}): ${tsOut.error?.message || 'Syntax error'}`;
+        recordHistory(executionId, 'typescript', code, '', errMsg, elapsed, false, 'TypeScript Transpiler');
+        return res.json({
+          success: false,
+          executionId,
+          language: 'typescript',
+          output: '',
+          error: errMsg,
+          executionTimeMs: elapsed,
+          engine: 'esbuild TypeScript + Isolated VM'
+        });
+      }
+      execJsCode = tsOut.jsCode;
+    }
+
+    if (normalizedLang === 'javascript' || normalizedLang === 'typescript') {
       const logs: string[] = [];
       const sandbox = {
         console: {
@@ -1307,7 +1571,7 @@ app.post('/api/execute', async (req: Request, res: Response) => {
       };
 
       const context = vm.createContext(sandbox);
-      const script = new vm.Script(code);
+      const script = new vm.Script(execJsCode);
 
       try {
         const evalResult = script.runInContext(context, {
@@ -1486,7 +1750,10 @@ app.post('/api/judge', async (req: Request, res: Response) => {
     language,
     code,
     methodName = 'solve',
+    params,
+    returnType,
     unorderedReturn = false,
+    dataStructureKind = null,
     expectedPrintSubstring = '',
     testCases = [],
     timeoutMs = 3000
@@ -1494,15 +1761,17 @@ app.post('/api/judge', async (req: Request, res: Response) => {
 
   let normalizedLang = typeof language === 'string' ? language.trim().toLowerCase() : '';
   if (normalizedLang === 'js') normalizedLang = 'javascript';
+  if (normalizedLang === 'ts') normalizedLang = 'typescript';
+  if (normalizedLang === 'c++') normalizedLang = 'cpp';
 
-  if (normalizedLang !== 'python' && normalizedLang !== 'javascript') {
+  if (!['python', 'javascript', 'typescript', 'java', 'c', 'cpp'].includes(normalizedLang)) {
     return res.status(400).json({
       verdict: 'Runtime Error',
       passedCount: 0,
       totalCount: 0,
       runtimeMs: 0,
       cases: [],
-      errorMessage: 'Judge supports "python" and "javascript".'
+      errorMessage: 'Judge supports python, javascript, typescript, java, c, and cpp.'
     });
   }
 
@@ -1546,10 +1815,44 @@ app.post('/api/judge', async (req: Request, res: Response) => {
   const deadline = Math.min(Math.max(Number(timeoutMs) || 3000, 500), 5000);
   const safeCases = Array.isArray(testCases) ? testCases : [];
 
-  if (normalizedLang === 'javascript') {
+  if (normalizedLang === 'java' || normalizedLang === 'c' || normalizedLang === 'cpp') {
+    const result = await judgeCompiledLanguage({
+      language: normalizedLang,
+      code,
+      methodName,
+      params,
+      returnType,
+      unorderedReturn: Boolean(unorderedReturn),
+      dataStructureKind,
+      expectedPrintSubstring,
+      testCases: safeCases,
+      timeoutMs: deadline
+    });
+    return res.json(result);
+  }
+
+  let jsExecutionSource = code;
+  if (normalizedLang === 'typescript') {
+    const tsOut = transpileTypeScript(code);
+    if (!tsOut.ok || !tsOut.jsCode) {
+      return res.json({
+        verdict: 'Compile Error',
+        passedCount: 0,
+        totalCount: safeCases.length,
+        runtimeMs: Date.now() - startTime,
+        cases: [],
+        errorLine: tsOut.error?.line || 1,
+        errorMessage: tsOut.error?.message || 'TypeScript compilation error'
+      });
+    }
+    jsExecutionSource = tsOut.jsCode;
+  }
+
+  if (normalizedLang === 'javascript' || normalizedLang === 'typescript') {
+    let parsedAst: any = null;
     try {
-      acorn.parse(code, { ecmaVersion: 'latest', sourceType: 'script', locations: true });
-      new vm.Script(code, { filename: 'solution.js' });
+      parsedAst = acorn.parse(jsExecutionSource, { ecmaVersion: 'latest', sourceType: 'script', locations: true });
+      new vm.Script(jsExecutionSource, { filename: 'solution.js' });
     } catch (synErr: any) {
       const line = synErr?.loc?.line || 1;
       const msg = synErr?.message ? String(synErr.message).replace(/\s*\(\d+:\d+\)$/, '') : 'SyntaxError';
@@ -1564,11 +1867,88 @@ app.post('/api/judge', async (req: Request, res: Response) => {
       });
     }
 
+    const analyzeJsAstComplexity = (astRoot: any, sourceText: string) => {
+      let maxLoopDepth = 0;
+      let hasSort = /\.sort\s*\(/.test(sourceText);
+      let hasRecursion = false;
+      let hasAuxCollection = /\bnew\s+(Map|Set|Array)\b|\{\s*\}|\[\s*\]/.test(sourceText);
+
+      const walk = (node: any, depth: number, fnStack: string[]) => {
+        if (!node || typeof node !== 'object') return;
+        const isLoop =
+          node.type === 'ForStatement' ||
+          node.type === 'ForOfStatement' ||
+          node.type === 'ForInStatement' ||
+          node.type === 'WhileStatement' ||
+          node.type === 'DoWhileStatement';
+        const nextDepth = isLoop ? depth + 1 : depth;
+        if (nextDepth > maxLoopDepth) maxLoopDepth = nextDepth;
+
+        let nextFns = fnStack;
+        if (
+          (node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression') &&
+          node.id?.name
+        ) {
+          nextFns = [...fnStack, node.id.name];
+        } else if (node.type === 'MethodDefinition' && node.key?.name) {
+          nextFns = [...fnStack, node.key.name];
+        } else if (
+          node.type === 'VariableDeclarator' &&
+          node.id?.name &&
+          (node.init?.type === 'FunctionExpression' || node.init?.type === 'ArrowFunctionExpression')
+        ) {
+          nextFns = [...fnStack, node.id.name];
+        }
+
+        if (node.type === 'CallExpression') {
+          const calleeName =
+            node.callee?.type === 'Identifier'
+              ? node.callee.name
+              : node.callee?.property?.name;
+          if (calleeName && nextFns.includes(calleeName)) {
+            hasRecursion = true;
+          }
+        }
+
+        for (const val of Object.values(node)) {
+          if (Array.isArray(val)) {
+            for (const child of val) walk(child, nextDepth, nextFns);
+          } else if (val && typeof val === 'object' && typeof (val as any).type === 'string') {
+            walk(val, nextDepth, nextFns);
+          }
+        }
+      };
+
+      walk(astRoot, 0, []);
+
+      let time = 'O(1)';
+      if (maxLoopDepth >= 3) time = 'O(n^3)';
+      else if (maxLoopDepth === 2) time = 'O(n^2)';
+      else if (hasSort && maxLoopDepth <= 1) time = 'O(n log n)';
+      else if (maxLoopDepth === 1 && (/>>\s*1|\/\s*2|Math\.floor\([^)]*\/\s*2/.test(sourceText))) {
+        time = 'O(log n)';
+      } else if (maxLoopDepth === 1) time = 'O(n)';
+      else if (hasRecursion) time = 'O(n) / recursive';
+
+      const space = hasAuxCollection ? 'O(n)' : hasRecursion ? 'O(h) stack' : 'O(1)';
+      const notes: string[] = [];
+      if (maxLoopDepth > 0) notes.push(`Loop depth: ${maxLoopDepth}`);
+      if (hasSort) notes.push('Sorting detected');
+      if (hasRecursion) notes.push('Recursion detected');
+      if (hasAuxCollection) notes.push('Auxiliary collection allocated');
+      if (notes.length === 0) notes.push('Constant-time direct evaluation');
+
+      return { time, space, notes };
+    };
+
+    const jsComplexity = analyzeJsAstComplexity(parsedAst, jsExecutionSource);
+
     const activeLogs: string[] = [];
     const baseSandboxKeys = new Set([
       'console', 'Math', 'Date', 'JSON', 'Array', 'Object', 'String', 'Number',
       'Boolean', 'RegExp', 'Map', 'Set', 'BigInt', 'Error', 'TypeError', 'RangeError',
       'Uint8Array', 'Int32Array', 'parseInt', 'parseFloat', 'isNaN', 'isFinite',
+      'ListNode', 'TreeNode',
       '__lcParseArg', '__lcDeepEqual', '__lcCanonical'
     ]);
 
@@ -1623,6 +2003,88 @@ app.post('/api/judge', async (req: Request, res: Response) => {
       return false;
     };
 
+    class ListNode {
+      val: any;
+      next: any;
+      constructor(val = 0, next = null) {
+        this.val = val;
+        this.next = next;
+      }
+    }
+
+    class TreeNode {
+      val: any;
+      left: any;
+      right: any;
+      constructor(val = 0, left = null, right = null) {
+        this.val = val;
+        this.left = left;
+        this.right = right;
+      }
+    }
+
+    const arrayToListNode = (arr: any) => {
+      if (!Array.isArray(arr) || arr.length === 0) return null;
+      const dummy = new ListNode(0);
+      let curr = dummy;
+      for (const v of arr) {
+        curr.next = new ListNode(v);
+        curr = curr.next;
+      }
+      return dummy.next;
+    };
+
+    const listNodeToArray = (head: any) => {
+      const out: any[] = [];
+      const seen = new Set();
+      let curr = head;
+      while (curr && !seen.has(curr) && out.length < 5000) {
+        seen.add(curr);
+        out.push(curr.val);
+        curr = curr.next;
+      }
+      return out;
+    };
+
+    const arrayToTreeNode = (arr: any) => {
+      if (!Array.isArray(arr) || arr.length === 0 || arr[0] === null) return null;
+      const root = new TreeNode(arr[0]);
+      const queue: any[] = [root];
+      let idx = 1;
+      while (queue.length > 0 && idx < arr.length) {
+        const node = queue.shift();
+        if (idx < arr.length && arr[idx] !== null && arr[idx] !== undefined) {
+          node.left = new TreeNode(arr[idx]);
+          queue.push(node.left);
+        }
+        idx += 1;
+        if (idx < arr.length && arr[idx] !== null && arr[idx] !== undefined) {
+          node.right = new TreeNode(arr[idx]);
+          queue.push(node.right);
+        }
+        idx += 1;
+      }
+      return root;
+    };
+
+    const treeNodeToArray = (root: any) => {
+      if (!root) return [];
+      const out: any[] = [];
+      const queue: any[] = [root];
+      while (queue.length > 0 && out.length < 5000) {
+        const node = queue.shift();
+        if (node) {
+          out.push(node.val);
+          queue.push(node.left ?? null);
+          queue.push(node.right ?? null);
+        } else {
+          out.push(null);
+        }
+      }
+      while (out.length > 0 && out[out.length - 1] === null) out.pop();
+      return out;
+    };
+
     const sandbox: Record<string, any> = {
       console: {
         log: (...args: any[]) =>
@@ -1634,6 +2096,7 @@ app.post('/api/judge', async (req: Request, res: Response) => {
         info: (...args: any[]) =>
           activeLogs.push(args.map((a) => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' '))
       },
+      ListNode, TreeNode,
       Math, Date, JSON, Array, Object, String, Number, Boolean, RegExp,
       Map, Set, BigInt, Error, TypeError, RangeError, Uint8Array, Int32Array,
       parseInt, parseFloat, isNaN, isFinite
@@ -1642,7 +2105,7 @@ app.post('/api/judge', async (req: Request, res: Response) => {
     const context = vm.createContext(sandbox);
 
     try {
-      const userScript = new vm.Script(code, { filename: 'solution.js' });
+      const userScript = new vm.Script(jsExecutionSource, { filename: 'solution.js' });
       userScript.runInContext(context, { timeout: deadline, breakOnSigint: true });
     } catch (runErr: any) {
       const isTimeout = runErr?.message?.includes('timed out');
@@ -1708,6 +2171,7 @@ app.post('/api/judge', async (req: Request, res: Response) => {
         passedCount: passed ? 1 : 0,
         totalCount: 1,
         runtimeMs: elapsed,
+        complexity: jsComplexity,
         cases: [
           {
             id: 'script-1',
@@ -1726,7 +2190,25 @@ app.post('/api/judge', async (req: Request, res: Response) => {
     const caseResults: any[] = [];
     for (let i = 0; i < safeCases.length; i += 1) {
       const tc = safeCases[i];
-      const parsedArgs = (tc.inputs || []).map((inp: any) => parseArgValue(inp.value));
+      const parsedArgs = (tc.inputs || []).map((inp: any) => {
+        const val = parseArgValue(inp.value);
+        const paramName = String(inp.name || '').toLowerCase();
+        if (
+          dataStructureKind === 'linked-list' &&
+          Array.isArray(val) &&
+          ['head', 'list1', 'list2', 'l1', 'l2'].includes(paramName)
+        ) {
+          return arrayToListNode(val);
+        }
+        if (
+          dataStructureKind === 'tree' &&
+          Array.isArray(val) &&
+          ['root', 'p', 'q', 'subroot'].includes(paramName)
+        ) {
+          return arrayToTreeNode(val);
+        }
+        return val;
+      });
       const inputDisplay = (tc.inputs || []).map((inp: any) => `${inp.name} = ${inp.value}`).join('\n');
       activeLogs.length = 0;
 
@@ -1741,6 +2223,11 @@ app.post('/api/judge', async (req: Request, res: Response) => {
         );
         if (actual === undefined && parsedArgs.length > 0) {
           actual = parsedArgs[0];
+        }
+        if (actual && actual instanceof ListNode) {
+          actual = listNodeToArray(actual);
+        } else if (actual && actual instanceof TreeNode) {
+          actual = treeNodeToArray(actual);
         }
         const caseStdout = activeLogs.join('\n');
         const actualStr = JSON.stringify(actual) ?? String(actual);
@@ -1784,6 +2271,7 @@ app.post('/api/judge', async (req: Request, res: Response) => {
           passedCount: caseResults.filter((c) => c.passed).length,
           totalCount: safeCases.length,
           runtimeMs: Date.now() - startTime,
+          complexity: jsComplexity,
           cases: caseResults,
           errorLine: lineMatch ? parseInt(lineMatch[1], 10) : 1,
           errorMessage: errMsg
@@ -1798,6 +2286,7 @@ app.post('/api/judge', async (req: Request, res: Response) => {
       passedCount,
       totalCount: caseResults.length,
       runtimeMs: Date.now() - startTime,
+      complexity: jsComplexity,
       cases: caseResults
     });
   }
@@ -1825,8 +2314,128 @@ payload = json.loads(sys.stdin.read())
 user_code = payload["code"]
 method_name = payload.get("methodName", "solve")
 unordered = bool(payload.get("unorderedReturn", False))
+ds_kind = payload.get("dataStructureKind")
 test_cases = payload.get("testCases", [])
 expected_sub = payload.get("expectedPrintSubstring", "")
+
+class ListNode:
+    def __init__(self, val=0, next=None):
+        self.val = val
+        self.next = next
+
+class TreeNode:
+    def __init__(self, val=0, left=None, right=None):
+        self.val = val
+        self.left = left
+        self.right = right
+
+def array_to_list(arr):
+    if not isinstance(arr, list) or len(arr) == 0:
+        return None
+    dummy = ListNode(0)
+    curr = dummy
+    for v in arr:
+        curr.next = ListNode(v)
+        curr = curr.next
+    return dummy.next
+
+def list_to_array(head):
+    out = []
+    seen = set()
+    curr = head
+    while curr is not None and id(curr) not in seen and len(out) < 5000:
+        seen.add(id(curr))
+        out.append(curr.val)
+        curr = curr.next
+    return out
+
+def array_to_tree(arr):
+    if not isinstance(arr, list) or len(arr) == 0 or arr[0] is None:
+        return None
+    root = TreeNode(arr[0])
+    q = deque([root])
+    idx = 1
+    while q and idx < len(arr):
+        node = q.popleft()
+        if idx < len(arr) and arr[idx] is not None:
+            node.left = TreeNode(arr[idx])
+            q.append(node.left)
+        idx += 1
+        if idx < len(arr) and arr[idx] is not None:
+            node.right = TreeNode(arr[idx])
+            q.append(node.right)
+        idx += 1
+    return root
+
+def tree_to_array(root):
+    if root is None:
+        return []
+    out = []
+    q = deque([root])
+    while q and len(out) < 5000:
+        node = q.popleft()
+        if node is not None:
+            out.append(node.val)
+            q.append(node.left)
+            q.append(node.right)
+        else:
+            out.append(None)
+    while out and out[-1] is None:
+        out.pop()
+    return out
+
+def analyze_py_complexity(tree, src):
+    max_depth = 0
+    has_sort = ".sort(" in src or "sorted(" in src
+    has_recursion = False
+    has_aux = any(tok in src for tok in ["{}", "set(", "dict(", "defaultdict(", "Counter(", "deque("])
+
+    def visit(node, depth, fn_names):
+        nonlocal max_depth, has_recursion
+        is_loop = isinstance(node, (ast.For, ast.AsyncFor, ast.While))
+        next_depth = depth + 1 if is_loop else depth
+        if next_depth > max_depth:
+            max_depth = next_depth
+        next_fns = fn_names
+        if isinstance(node, ast.FunctionDef):
+            next_fns = fn_names + [node.name]
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id in next_fns:
+                has_recursion = True
+            elif isinstance(node.func, ast.Attribute) and node.func.attr in next_fns:
+                has_recursion = True
+        for child in ast.iter_child_nodes(node):
+            visit(child, next_depth, next_fns)
+
+    visit(tree, 0, [])
+    if max_depth >= 3:
+        t = "O(n^3)"
+    elif max_depth == 2:
+        t = "O(n^2)"
+    elif has_sort and max_depth <= 1:
+        t = "O(n log n)"
+    elif max_depth == 1 and ("// 2" in src or ">> 1" in src):
+        t = "O(log n)"
+    elif max_depth == 1:
+        t = "O(n)"
+    elif has_recursion:
+        t = "O(n) / recursive"
+    else:
+        t = "O(1)"
+
+    s = "O(n)" if has_aux else ("O(h) stack" if has_recursion else "O(1)")
+    notes = []
+    if max_depth > 0:
+        notes.append(f"Loop depth: {max_depth}")
+    if has_sort:
+        notes.append("Sorting detected")
+    if has_recursion:
+        notes.append("Recursion detected")
+    if has_aux:
+        notes.append("Auxiliary structure allocated")
+    if not notes:
+        notes.append("Constant-time direct evaluation")
+    return {"time": t, "space": s, "notes": notes}
 
 def parse_literal(raw):
     text = str(raw).strip()
@@ -1870,6 +2479,10 @@ def deep_equal(a, b, is_unordered):
     return a == b
 
 def to_json_safe(val):
+    if isinstance(val, ListNode):
+        return list_to_array(val)
+    if isinstance(val, TreeNode):
+        return tree_to_array(val)
     if isinstance(val, tuple):
         return [to_json_safe(x) for x in val]
     if isinstance(val, set):
@@ -1890,13 +2503,16 @@ def extract_solution_line(exc):
 ns = {
     "List": List, "Dict": Dict, "Set": Set, "Tuple": Tuple,
     "Optional": Optional, "Any": Any, "Callable": Callable,
+    "ListNode": ListNode, "TreeNode": TreeNode,
     "math": math, "collections": collections, "heapq": heapq,
     "bisect": bisect, "itertools": itertools, "functools": functools,
     "re": re, "defaultdict": defaultdict, "deque": deque, "Counter": Counter
 }
 
 try:
-    compiled = compile(user_code, "<solution>", "exec")
+    ast_tree = ast.parse(user_code, filename="<solution>")
+    py_complexity = analyze_py_complexity(ast_tree, user_code)
+    compiled = compile(ast_tree, "<solution>", "exec")
 except SyntaxError as syn:
     print(json.dumps({
         "verdict": "Compile Error",
@@ -1917,6 +2533,7 @@ except Exception as exc:
         "verdict": "Runtime Error",
         "passedCount": 0,
         "totalCount": len(test_cases),
+        "complexity": py_complexity,
         "cases": [],
         "errorLine": extract_solution_line(exc),
         "errorMessage": f"{type(exc).__name__}: {exc}"
@@ -1958,6 +2575,7 @@ if target_fn is None:
         "verdict": "Accepted" if passed else "Wrong Answer",
         "passedCount": 1 if passed else 0,
         "totalCount": 1,
+        "complexity": py_complexity,
         "cases": [{
             "id": "script-1",
             "label": "Script Output",
@@ -1974,11 +2592,20 @@ if target_fn is None:
 results = []
 for idx, tc in enumerate(test_cases):
     inputs = tc.get("inputs", [])
-    args = [parse_literal(item["value"]) for item in inputs]
+    raw_args = []
+    for item in inputs:
+        val = parse_literal(item["value"])
+        pname = str(item.get("name", "")).lower()
+        if ds_kind == "linked-list" and isinstance(val, list) and pname in ("head", "list1", "list2", "l1", "l2"):
+            raw_args.append(array_to_list(val))
+        elif ds_kind == "tree" and isinstance(val, list) and pname in ("root", "p", "q", "subroot"):
+            raw_args.append(array_to_tree(val))
+        else:
+            raw_args.append(val)
     input_disp = "\\n".join(f'{item["name"]} = {item["value"]}' for item in inputs)
     case_buf = io.StringIO()
     try:
-        call_args = copy.deepcopy(args)
+        call_args = copy.deepcopy(raw_args)
         with redirect_stdout(case_buf):
             actual = target_fn(*call_args)
         has_exp = bool(tc.get("hasExpected", False))
@@ -2017,6 +2644,7 @@ for idx, tc in enumerate(test_cases):
             "verdict": "Runtime Error",
             "passedCount": sum(1 for r in results if r["passed"]),
             "totalCount": len(test_cases),
+            "complexity": py_complexity,
             "cases": results,
             "errorLine": extract_solution_line(exc),
             "errorMessage": err_msg
@@ -2028,6 +2656,7 @@ print(json.dumps({
     "verdict": "Accepted" if (passed_count == len(results) and len(results) > 0) else "Wrong Answer",
     "passedCount": passed_count,
     "totalCount": len(results),
+    "complexity": py_complexity,
     "cases": results
 }))
 `;
@@ -2054,6 +2683,7 @@ print(json.dumps({
       code,
       methodName,
       unorderedReturn,
+      dataStructureKind,
       testCases: safeCases,
       expectedPrintSubstring
     })
@@ -2386,6 +3016,10 @@ app.get('/api/metrics', (_req: Request, res: Response) => {
   const languageCounts = {
     python: store.history.filter(h => h.language === 'python').length,
     javascript: store.history.filter(h => h.language === 'javascript').length,
+    typescript: store.history.filter(h => h.language === 'typescript').length,
+    java: store.history.filter(h => h.language === 'java').length,
+    c: store.history.filter(h => h.language === 'c').length,
+    cpp: store.history.filter(h => h.language === 'cpp').length,
     ruby: store.history.filter(h => h.language === 'ruby').length
   };
 
@@ -2403,8 +3037,8 @@ app.get('/api/metrics', (_req: Request, res: Response) => {
 app.get('/api/health', (_req: Request, res: Response) => {
   res.json({
     status: 'UP',
-    platform: 'PolyglotMesh Preview Runtime (Java 21 Spring WebFlux backend in /backend)',
-    supportedLanguages: ['javascript', 'python', 'ruby'],
+    platform: 'PolyglotMesh Preview Runtime (Python 3, Node VM, esbuild TS, OpenJDK 17, GCC C11, G++ C++17)',
+    supportedLanguages: ['javascript', 'typescript', 'python', 'java', 'c', 'cpp', 'ruby'],
     runtimes: RUNTIME_AVAILABILITY,
     uptimeSeconds: Math.floor(process.uptime()),
     memoryUsageMb: Math.round(process.memoryUsage().heapUsed / 1024 / 1024)

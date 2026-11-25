@@ -219,4 +219,196 @@ export function configureLeetCodeMonaco(monaco: any) {
       return { suggestions };
     }
   });
+
+  monaco.languages.registerCompletionItemProvider('typescript', {
+    provideCompletionItems: (model: any, position: any) => {
+      const word = model.getWordUntilPosition(position);
+      const range = {
+        startLineNumber: position.lineNumber,
+        endLineNumber: position.lineNumber,
+        startColumn: word.startColumn,
+        endColumn: word.endColumn
+      };
+      return {
+        suggestions: [
+          {
+            label: 'fori',
+            kind: Kind.Snippet,
+            insertText: 'for (let ${1:i} = 0; ${1:i} < ${2:nums}.length; ${1:i}++) {\n    ${3}\n}',
+            insertTextRules: InsertAsSnippet,
+            documentation: 'Indexed loop',
+            range
+          },
+          {
+            label: 'Map<number, number>',
+            kind: Kind.Class,
+            insertText: 'new Map<${1:number}, ${2:number}>()',
+            insertTextRules: InsertAsSnippet,
+            documentation: 'Typed Hash Map',
+            range
+          },
+          {
+            label: 'Set<number>',
+            kind: Kind.Class,
+            insertText: 'new Set<${1:number}>()',
+            insertTextRules: InsertAsSnippet,
+            documentation: 'Typed Hash Set',
+            range
+          }
+        ]
+      };
+    }
+  });
+
+  monaco.languages.registerCompletionItemProvider('java', {
+    provideCompletionItems: (model: any, position: any) => {
+      const word = model.getWordUntilPosition(position);
+      const range = {
+        startLineNumber: position.lineNumber,
+        endLineNumber: position.lineNumber,
+        startColumn: word.startColumn,
+        endColumn: word.endColumn
+      };
+      return {
+        suggestions: [
+          {
+            label: 'fori',
+            kind: Kind.Snippet,
+            insertText: 'for (int ${1:i} = 0; ${1:i} < ${2:nums.length}; ${1:i}++) {\n    ${3}\n}',
+            insertTextRules: InsertAsSnippet,
+            documentation: 'Indexed for loop',
+            range
+          },
+          {
+            label: 'HashMap',
+            kind: Kind.Class,
+            insertText: 'Map<${1:Integer}, ${2:Integer}> ${3:map} = new HashMap<>();',
+            insertTextRules: InsertAsSnippet,
+            documentation: 'Java HashMap',
+            range
+          },
+          {
+            label: 'HashSet',
+            kind: Kind.Class,
+            insertText: 'Set<${1:Integer}> ${2:set} = new HashSet<>();',
+            insertTextRules: InsertAsSnippet,
+            documentation: 'Java HashSet',
+            range
+          },
+          {
+            label: 'ArrayList',
+            kind: Kind.Class,
+            insertText: 'List<${1:Integer}> ${2:res} = new ArrayList<>();',
+            insertTextRules: InsertAsSnippet,
+            documentation: 'Java ArrayList',
+            range
+          },
+          {
+            label: 'ArrayDeque',
+            kind: Kind.Class,
+            insertText: 'Deque<${1:Integer}> ${2:q} = new ArrayDeque<>();',
+            insertTextRules: InsertAsSnippet,
+            documentation: 'Java Queue/Stack via ArrayDeque',
+            range
+          },
+          {
+            label: 'sout',
+            kind: Kind.Snippet,
+            insertText: 'System.out.println(${1});',
+            insertTextRules: InsertAsSnippet,
+            documentation: 'Print line to stdout',
+            range
+          }
+        ]
+      };
+    }
+  });
+
+  monaco.languages.registerCompletionItemProvider('cpp', {
+    provideCompletionItems: (model: any, position: any) => {
+      const word = model.getWordUntilPosition(position);
+      const range = {
+        startLineNumber: position.lineNumber,
+        endLineNumber: position.lineNumber,
+        startColumn: word.startColumn,
+        endColumn: word.endColumn
+      };
+      return {
+        suggestions: [
+          {
+            label: 'fori',
+            kind: Kind.Snippet,
+            insertText: 'for (int ${1:i} = 0; ${1:i} < (int)${2:nums}.size(); ${1:i}++) {\n    ${3}\n}',
+            insertTextRules: InsertAsSnippet,
+            documentation: 'Indexed loop over vector',
+            range
+          },
+          {
+            label: 'unordered_map',
+            kind: Kind.Class,
+            insertText: 'unordered_map<${1:int}, ${2:int}> ${3:mp};',
+            insertTextRules: InsertAsSnippet,
+            documentation: 'STL hash map',
+            range
+          },
+          {
+            label: 'unordered_set',
+            kind: Kind.Class,
+            insertText: 'unordered_set<${1:int}> ${2:seen};',
+            insertTextRules: InsertAsSnippet,
+            documentation: 'STL hash set',
+            range
+          },
+          {
+            label: 'sort',
+            kind: Kind.Function,
+            insertText: 'sort(${1:nums}.begin(), ${1:nums}.end());',
+            insertTextRules: InsertAsSnippet,
+            documentation: 'STL sort ascending',
+            range
+          }
+        ]
+      };
+    }
+  });
+
+  monaco.languages.registerCompletionItemProvider('c', {
+    provideCompletionItems: (model: any, position: any) => {
+      const word = model.getWordUntilPosition(position);
+      const range = {
+        startLineNumber: position.lineNumber,
+        endLineNumber: position.lineNumber,
+        startColumn: word.startColumn,
+        endColumn: word.endColumn
+      };
+      return {
+        suggestions: [
+          {
+            label: 'fori',
+            kind: Kind.Snippet,
+            insertText: 'for (int ${1:i} = 0; ${1:i} < ${2:n}; ${1:i}++) {\n    ${3}\n}',
+            insertTextRules: InsertAsSnippet,
+            documentation: 'Indexed for loop',
+            range
+          },
+          {
+            label: 'malloc',
+            kind: Kind.Function,
+            insertText: '(${1:int}*)malloc(sizeof(${1:int}) * (${2:n}))',
+            insertTextRules: InsertAsSnippet,
+            documentation: 'Allocate heap array',
+            range
+          },
+          {
+            label: 'printf',
+            kind: Kind.Function,
+            insertText: 'printf("${1:%d}\\n", ${2:val});',
+            insertTextRules: InsertAsSnippet,
+            documentation: 'Formatted print',
+            range
+          }
+        ]
+      };
+    }
+  });
 }

@@ -1,4 +1,5 @@
-export type SupportedLanguage = 'python' | 'javascript' | 'ruby';
+export type SolverLanguage = 'python' | 'javascript' | 'typescript' | 'java' | 'c' | 'cpp';
+export type SupportedLanguage = SolverLanguage | 'ruby';
 
 export interface ExecutionRequest {
   language: SupportedLanguage;
@@ -58,6 +59,10 @@ export interface PerformanceMetrics {
   languageCounts: {
     python: number;
     javascript: number;
+    typescript?: number;
+    java?: number;
+    c?: number;
+    cpp?: number;
     ruby: number;
   };
   recentHistory: ExecutionHistoryRecord[];
@@ -69,7 +74,11 @@ export interface HealthStatus {
   supportedLanguages: string[];
   runtimes: {
     javascript: boolean;
+    typescript?: boolean;
     python: boolean;
+    java?: boolean;
+    c?: boolean;
+    cpp?: boolean;
     ruby: boolean;
   };
   uptimeSeconds?: number;
@@ -148,7 +157,7 @@ export interface DebugStep {
 
 export interface DebugResponse {
   success: boolean;
-  language: 'python' | 'javascript';
+  language: SolverLanguage;
   steps: DebugStep[];
   syntaxError?: {
     line: number;

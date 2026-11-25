@@ -21,11 +21,16 @@ export interface LeetCodeProblemSpec {
   returnType: { py: string; js: string };
   unorderedReturn?: boolean;
   isDesignClass?: boolean;
+  dataStructureKind?: 'linked-list' | 'tree';
   constraints: string[];
   defaultTestCases: LeetCodeTestCase[];
   hiddenTestCases: LeetCodeTestCase[];
   pythonStub: string;
   javascriptStub: string;
+  typescriptStub: string;
+  javaStub: string;
+  cppStub: string;
+  cStub: string;
 }
 
 function toCamelMethod(title: string): string {
@@ -472,7 +477,24 @@ const OVERRIDES: Record<string, SpecOverride> = {
         expectedDisplay: '1'
       }
     ]
-  }
+  },
+  'lc-206-reverse-linked-list': { methodName: 'reverseList' },
+  'lc-21-merge-two-sorted-lists': { methodName: 'mergeTwoLists' },
+  'lc-141-linked-list-cycle': { methodName: 'hasCycle' },
+  'lc-143-reorder-list': { methodName: 'reorderList' },
+  'lc-19-remove-nth-node-from-end-of-list': { methodName: 'removeNthFromEnd' },
+  'lc-226-invert-binary-tree': { methodName: 'invertTree' },
+  'lc-104-maximum-depth-of-binary-tree': { methodName: 'maxDepth' },
+  'lc-543-diameter-of-binary-tree': { methodName: 'diameterOfBinaryTree' },
+  'lc-110-balanced-binary-tree': { methodName: 'isBalanced' },
+  'lc-100-same-tree': { methodName: 'isSameTree' },
+  'lc-572-subtree-of-another-tree': { methodName: 'isSubtree' },
+  'lc-235-lowest-common-ancestor-of-a-binary-search-tree': { methodName: 'lowestCommonAncestor' },
+  'lc-102-binary-tree-level-order-traversal': { methodName: 'levelOrder' },
+  'lc-199-binary-tree-right-side-view': { methodName: 'rightSideView' },
+  'lc-1448-count-good-nodes-in-binary-tree': { methodName: 'goodNodes' },
+  'lc-98-validate-binary-search-tree': { methodName: 'isValidBST' },
+  'lc-230-kth-smallest-element-in-a-bst': { methodName: 'kthSmallest' }
 };
 
 function buildPythonStub(
@@ -502,6 +524,218 @@ function buildJavaScriptStub(
     .join('\n');
   const paramNames = params.map((p) => p.name).join(', ');
   return `/**\n${jsDocParams}\n * @return {${returnType}}\n */\nvar ${methodName} = function(${paramNames}) {\n    \n};`;
+}
+
+function mapPyTypeToTs(pyType: string): string {
+  switch (pyType) {
+    case 'int':
+    case 'float':
+      return 'number';
+    case 'bool':
+      return 'boolean';
+    case 'str':
+      return 'string';
+    case 'List[int]':
+      return 'number[]';
+    case 'List[str]':
+      return 'string[]';
+    case 'List[List[int]]':
+      return 'number[][]';
+    case 'List[List[str]]':
+      return 'string[][]';
+    case 'Optional[ListNode]':
+      return 'ListNode | null';
+    case 'Optional[TreeNode]':
+      return 'TreeNode | null';
+    default:
+      return 'any';
+  }
+}
+
+function buildTypeScriptStub(
+  methodName: string,
+  params: LeetCodeParamSpec[],
+  pyReturnType: string,
+  isDesignClass?: boolean
+): string {
+  if (isDesignClass) {
+    return `class ${methodName} {\n    constructor() {\n        \n    }\n}`;
+  }
+  const tsParams = params.map((p) => `${p.name}: ${mapPyTypeToTs(p.pyType)}`).join(', ');
+  return `function ${methodName}(${tsParams}): ${mapPyTypeToTs(pyReturnType)} {\n    \n};`;
+}
+
+function mapPyTypeToJava(pyType: string): string {
+  switch (pyType) {
+    case 'int':
+      return 'int';
+    case 'float':
+      return 'double';
+    case 'bool':
+      return 'boolean';
+    case 'str':
+      return 'String';
+    case 'List[int]':
+      return 'int[]';
+    case 'List[str]':
+      return 'String[]';
+    case 'List[List[int]]':
+      return 'int[][]';
+    case 'List[List[str]]':
+      return 'String[][]';
+    case 'Optional[ListNode]':
+      return 'ListNode';
+    case 'Optional[TreeNode]':
+      return 'TreeNode';
+    default:
+      return 'Object';
+  }
+}
+
+function buildJavaStub(
+  methodName: string,
+  params: LeetCodeParamSpec[],
+  pyReturnType: string,
+  isDesignClass?: boolean
+): string {
+  if (isDesignClass) {
+    return `class ${methodName} {\n    public ${methodName}() {\n        \n    }\n}`;
+  }
+  const jParams = params.map((p) => `${mapPyTypeToJava(p.pyType)} ${p.name}`).join(', ');
+  return `class Solution {\n    public ${mapPyTypeToJava(pyReturnType)} ${methodName}(${jParams}) {\n        \n    }\n}`;
+}
+
+function mapPyTypeToCpp(pyType: string, asParam: boolean): string {
+  switch (pyType) {
+    case 'int':
+      return 'int';
+    case 'float':
+      return 'double';
+    case 'bool':
+      return 'bool';
+    case 'str':
+      return 'string';
+    case 'List[int]':
+      return asParam ? 'vector<int>&' : 'vector<int>';
+    case 'List[str]':
+      return asParam ? 'vector<string>&' : 'vector<string>';
+    case 'List[List[int]]':
+      return asParam ? 'vector<vector<int>>&' : 'vector<vector<int>>';
+    case 'List[List[str]]':
+      return asParam ? 'vector<vector<string>>&' : 'vector<vector<string>>';
+    case 'Optional[ListNode]':
+      return 'ListNode*';
+    case 'Optional[TreeNode]':
+      return 'TreeNode*';
+    default:
+      return 'int';
+  }
+}
+
+function buildCppStub(
+  methodName: string,
+  params: LeetCodeParamSpec[],
+  pyReturnType: string,
+  isDesignClass?: boolean
+): string {
+  if (isDesignClass) {
+    return `class ${methodName} {\npublic:\n    ${methodName}() {\n        \n    }\n};`;
+  }
+  const cppParams = params.map((p) => `${mapPyTypeToCpp(p.pyType, true)} ${p.name}`).join(', ');
+  return `class Solution {\npublic:\n    ${mapPyTypeToCpp(pyReturnType, false)} ${methodName}(${cppParams}) {\n        \n    }\n};`;
+}
+
+function buildCStub(
+  methodName: string,
+  params: LeetCodeParamSpec[],
+  pyReturnType: string,
+  isDesignClass?: boolean
+): string {
+  if (isDesignClass) {
+    return `typedef struct {\n    \n} ${methodName};\n\n${methodName}* ${methodName.charAt(0).toLowerCase() + methodName.slice(1)}Create() {\n    \n}`;
+  }
+
+  const cParams: string[] = [];
+  for (const p of params) {
+    switch (p.pyType) {
+      case 'int':
+        cParams.push(`int ${p.name}`);
+        break;
+      case 'float':
+        cParams.push(`double ${p.name}`);
+        break;
+      case 'bool':
+        cParams.push(`bool ${p.name}`);
+        break;
+      case 'str':
+        cParams.push(`char* ${p.name}`);
+        break;
+      case 'List[int]':
+        cParams.push(`int* ${p.name}`, `int ${p.name}Size`);
+        break;
+      case 'List[str]':
+        cParams.push(`char** ${p.name}`, `int ${p.name}Size`);
+        break;
+      case 'List[List[int]]':
+        cParams.push(`int** ${p.name}`, `int ${p.name}Size`, `int* ${p.name}ColSize`);
+        break;
+      case 'List[List[str]]':
+        cParams.push(`char*** ${p.name}`, `int ${p.name}Size`, `int* ${p.name}ColSize`);
+        break;
+      case 'Optional[ListNode]':
+        cParams.push(`struct ListNode* ${p.name}`);
+        break;
+      case 'Optional[TreeNode]':
+        cParams.push(`struct TreeNode* ${p.name}`);
+        break;
+      default:
+        cParams.push(`int ${p.name}`);
+        break;
+    }
+  }
+
+  let cRet = 'int';
+  switch (pyReturnType) {
+    case 'int':
+      cRet = 'int';
+      break;
+    case 'float':
+      cRet = 'double';
+      break;
+    case 'bool':
+      cRet = 'bool';
+      break;
+    case 'str':
+      cRet = 'char*';
+      break;
+    case 'List[int]':
+      cRet = 'int*';
+      cParams.push('int* returnSize');
+      break;
+    case 'List[str]':
+      cRet = 'char**';
+      cParams.push('int* returnSize');
+      break;
+    case 'List[List[int]]':
+      cRet = 'int**';
+      cParams.push('int* returnSize', 'int** returnColumnSizes');
+      break;
+    case 'List[List[str]]':
+      cRet = 'char***';
+      cParams.push('int* returnSize', 'int** returnColumnSizes');
+      break;
+    case 'Optional[ListNode]':
+      cRet = 'struct ListNode*';
+      break;
+    case 'Optional[TreeNode]':
+      cRet = 'struct TreeNode*';
+      break;
+    default:
+      cRet = 'int';
+      break;
+  }
+
+  return `${cRet} ${methodName}(${cParams.join(', ')}) {\n    \n}`;
 }
 
 export function getLeetCodeSpec(problem: AlgorithmProblem): LeetCodeProblemSpec {
@@ -538,9 +772,35 @@ export function getLeetCodeSpec(problem: AlgorithmProblem): LeetCodeProblemSpec 
   }));
 
   const firstInputs = defaultTestCases[0]?.inputs || [{ name: 'nums', value: '[1, 2, 3]' }];
+  const linkedListParamNames = new Set(['head', 'list1', 'list2', 'l1', 'l2', 'lists']);
+  const treeParamNames = new Set(['root', 'p', 'q', 'subroot']);
+
+  const looksLinkedList =
+    !override.isDesignClass &&
+    (problem.category === 'Linked List' || problem.id === 'palindrome-linked-list') &&
+    firstInputs.some((i) => linkedListParamNames.has(i.name.toLowerCase()));
+
+  const looksTree =
+    !override.isDesignClass &&
+    (problem.category === 'Trees' || problem.topics.includes('Trees') || problem.topics.includes('Tree')) &&
+    firstInputs.some((i) => treeParamNames.has(i.name.toLowerCase()));
+
+  const dataStructureKind: 'linked-list' | 'tree' | undefined = looksLinkedList
+    ? 'linked-list'
+    : looksTree
+    ? 'tree'
+    : undefined;
+
   const params: LeetCodeParamSpec[] =
     override.params ||
     firstInputs.map((inp) => {
+      const lower = inp.name.toLowerCase();
+      if (dataStructureKind === 'linked-list' && (lower === 'head' || lower === 'list1' || lower === 'list2' || lower === 'l1' || lower === 'l2')) {
+        return { name: inp.name, pyType: 'Optional[ListNode]', jsType: 'ListNode' };
+      }
+      if (dataStructureKind === 'tree' && (lower === 'root' || lower === 'p' || lower === 'q' || lower === 'subroot')) {
+        return { name: inp.name, pyType: 'Optional[TreeNode]', jsType: 'TreeNode' };
+      }
       const inferred = inferTypeFromLiteral(inp.value);
       return {
         name: inp.name,
@@ -550,7 +810,19 @@ export function getLeetCodeSpec(problem: AlgorithmProblem): LeetCodeProblemSpec 
     });
 
   const firstOutput = defaultTestCases[0]?.expectedDisplay || 'true';
-  const returnType = override.returnType || inferTypeFromLiteral(firstOutput);
+  let returnType = override.returnType || inferTypeFromLiteral(firstOutput);
+  if (!override.returnType && dataStructureKind === 'linked-list' && firstOutput.trim().startsWith('[') && !firstOutput.trim().startsWith('[[')) {
+    returnType = { py: 'Optional[ListNode]', js: 'ListNode' };
+  }
+  if (
+    !override.returnType &&
+    dataStructureKind === 'tree' &&
+    firstOutput.trim().startsWith('[') &&
+    !firstOutput.trim().startsWith('[[') &&
+    (methodName.toLowerCase().includes('tree') || methodName === 'lowestCommonAncestor')
+  ) {
+    returnType = { py: 'Optional[TreeNode]', js: 'TreeNode' };
+  }
 
   const defaultConstraints = override.constraints || [
     'All sample inputs fit within standard 32-bit / 64-bit bounds.',
@@ -563,10 +835,15 @@ export function getLeetCodeSpec(problem: AlgorithmProblem): LeetCodeProblemSpec 
     returnType,
     unorderedReturn: override.unorderedReturn,
     isDesignClass: override.isDesignClass,
+    dataStructureKind,
     constraints: defaultConstraints,
     defaultTestCases,
     hiddenTestCases,
     pythonStub: buildPythonStub(methodName, params, returnType.py, override.isDesignClass),
-    javascriptStub: buildJavaScriptStub(methodName, params, returnType.js, override.isDesignClass)
+    javascriptStub: buildJavaScriptStub(methodName, params, returnType.js, override.isDesignClass),
+    typescriptStub: buildTypeScriptStub(methodName, params, returnType.py, override.isDesignClass),
+    javaStub: buildJavaStub(methodName, params, returnType.py, override.isDesignClass),
+    cppStub: buildCppStub(methodName, params, returnType.py, override.isDesignClass),
+    cStub: buildCStub(methodName, params, returnType.py, override.isDesignClass)
   };
 }

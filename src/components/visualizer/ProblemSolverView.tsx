@@ -25,7 +25,10 @@ import {
   X,
   Code2,
   Check,
-  Search
+  Search,
+  History,
+  Lightbulb,
+  ArrowRight
 } from 'lucide-react';
 import {
   ALGORITHM_PROBLEMS,
@@ -35,6 +38,13 @@ import {
   getLeetCodeSpec,
   LeetCodeTestCase
 } from '../../data/leetcodeSpecs';
+import {
+  ProblemComplexityResult,
+  ProblemSubmissionRecord,
+  loadProblemSubmissions,
+  saveProblemSubmission,
+  getProblemHints
+} from '../../data/problemInsights';
 import {
   PalindromeLinkedListVisual,
   MergeIntervalsVisual,
@@ -47,7 +57,16 @@ import { ConfettiBurst } from './ConfettiBurst';
 import { DailyStreakCounter } from './DailyStreakCounter';
 import { configureLeetCodeMonaco } from './monacoLeetCodeSetup';
 import { DailyStreakState, readStoredDailyStreak } from '../../utils/dailyStreak';
-import { DebugResponse, DebugStep, SupportedLanguage } from '../../types';
+import { DebugResponse, DebugStep, SolverLanguage } from '../../types';
+
+const LANGUAGE_LABELS: Record<SolverLanguage, string> = {
+  python: 'Python 3',
+  javascript: 'JavaScript',
+  typescript: 'TypeScript',
+  java: 'Java',
+  c: 'C',
+  cpp: 'C++'
+};
 
 interface JudgeCaseResult {
   id: string;
@@ -70,6 +89,7 @@ interface JudgeVerdictResponse {
   passedCount: number;
   totalCount: number;
   runtimeMs: number;
+  complexity?: ProblemComplexityResult;
   cases: JudgeCaseResult[];
   errorLine?: number | null;
   errorMessage?: string | null;
@@ -88,13 +108,14 @@ interface ProblemSolverViewProps {
   problems?: AlgorithmProblem[];
   solvedIds?: string[];
   dailyStreak?: DailyStreakState;
-  initialLanguage?: 'python' | 'javascript';
+  initialLanguage?: SolverLanguage;
   isSolved?: boolean;
   onSelectProblem?: (problem: AlgorithmProblem) => void;
   onBackToProblems: () => void;
   onGoHome: () => void;
   onSolved: (problemId: string) => void;
   onToggleSolved?: (problemId: string) => void;
+  onOpenCommandPalette?: () => void;
 }
 
 const PREFS_STORAGE_KEY = 'polyglotmesh_editor_prefs_v1';
@@ -171,6 +192,20 @@ function formatTimer(seconds: number): string {
   return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
 }
 
+function formatRelativeTime(iso: string): string {
+  try {
+    const ms = Date.now() - new Date(iso).getTime();
+    if (ms < 60000) return 'Just now';
+    const mins = Math.floor(ms / 60000);
+    if (mins < 60) return `${mins}m ago`;
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return `${hrs}h ago`;
+    return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  } catch {
+    return '';
+  }
+}
+
 export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
   problem,
   problems = ALGORITHM_PROBLEMS,
@@ -182,18 +217,24 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
   onBackToProblems,
   onGoHome,
   onSolved,
-  onToggleSolved
+  onToggleSolved,
+  onOpenCommandPalette
 }) => {
-  const [lang, setLang] = useState<'python' | 'javascript'>(initialLanguage);
+  const [lang, setLang] = useState<SolverLanguage>(initialLanguage);
   const [code, setCode] = useState<string>(() => readDraft(problem.id, initialLanguage));
   const [noteText, setNoteText] = useState<string>(() => readNote(problem.id));
   const [localSolved, setLocalSolved] = useState<boolean>(false);
   const [confettiTrigger, setConfettiTrigger] = useState<number>(0);
 
   // Left & Bottom Panel Tabs
-  const [leftTab, setLeftTab] = useState<'description' | 'notes' | 'visualiser'>('description');
+  const [leftTab, setLeftTab] = useState<'description' | 'notes' | 'submissions' | 'visualiser'>('description');
   const [bottomTab, setBottomTab] = useState<'cases' | 'result'>('cases');
   const [topicsOpen, setTopicsOpen] = useState<boolean>(false);
+  const [openHints, setOpenHints] = useState<[boolean, boolean]>([false, false]);
+  const [submissions, setSubmissions] = useState<ProblemSubmissionRecord[]>(() =>
+    loadProblemSubmissions(problem.id)
+  );
+  const conceptualHints = useMemo(() => getProblemHints(problem), [problem]);
 
   // Testcases & Judge State
   const leetcodeSpec = useMemo(() => getLeetCodeSpec(problem), [problem]);
@@ -329,6 +370,8 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
     const saved = readDraft(problem.id, lang);
     setCode(saved);
     setNoteText(readNote(problem.id));
+    setSubmissions(loadProblemSubmissions(problem.id));
+    setOpenHints([false, false]);
     setTestCases(leetcodeSpec.defaultTestCases);
     setActiveCaseIdx(0);
     setActiveResultCaseIdx(0);
@@ -384,8 +427,15 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
   };
 
   const insertSignatureStub = () => {
-    const stub =
-      lang === 'python' ? leetcodeSpec.pythonStub : leetcodeSpec.javascriptStub;
+    const stubMap: Record<SolverLanguage, string> = {
+      python: leetcodeSpec.pythonStub,
+      javascript: leetcodeSpec.javascriptStub,
+      typescript: leetcodeSpec.typescriptStub,
+      java: leetcodeSpec.javaStub,
+      c: leetcodeSpec.cStub,
+      cpp: leetcodeSpec.cppStub
+    };
+    const stub = stubMap[lang] ?? leetcodeSpec.pythonStub;
     editSeqRef.current += 1;
     setCode(stub);
     setDebugDirty(false);
@@ -664,10 +714,13 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            language: lang as SupportedLanguage,
+            language: lang,
             code,
             methodName: leetcodeSpec.methodName,
+            params: leetcodeSpec.params,
+            returnType: leetcodeSpec.returnType,
             unorderedReturn: leetcodeSpec.unorderedReturn,
+            dataStructureKind: leetcodeSpec.dataStructureKind || null,
             expectedPrintSubstring: problem.expectedPrintSubstring,
             testCases: casesToRun,
             timeoutMs: 3000
@@ -675,6 +728,22 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
         });
         const data: JudgeVerdictResponse = await res.json();
         setJudgeResult({ ...data, isSubmit });
+
+        if (isSubmit && data.verdict) {
+          const nextSubs = saveProblemSubmission({
+            id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+            problemId: problem.id,
+            language: lang,
+            verdict: data.verdict,
+            passedCount: data.passedCount ?? 0,
+            totalCount: data.totalCount ?? casesToRun.length,
+            runtimeMs: data.runtimeMs ?? 0,
+            code,
+            complexity: data.complexity,
+            createdAt: new Date().toISOString()
+          });
+          setSubmissions(nextSubs);
+        }
 
         if (data.errorLine && data.errorMessage) {
           if (data.verdict === 'Compile Error') {
@@ -726,6 +795,68 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
       problem.id,
       onSolved
     ]
+  );
+
+  const debugSpecificCase = useCallback(
+    (caseIdx: number) => {
+      const targetTc = testCases[caseIdx] || leetcodeSpec.hiddenTestCases[caseIdx - testCases.length] || testCases[0];
+      if (!targetTc || !code.trim()) {
+        runDebugTrace(code, false);
+        return;
+      }
+
+      const dsKind = leetcodeSpec.dataStructureKind;
+      const methodName = leetcodeSpec.methodName;
+
+      if (lang === 'python') {
+        const argLines = targetTc.inputs.map((inp) => {
+          const lower = inp.name.toLowerCase();
+          const pyLit = inp.value
+            .replace(/\btrue\b/g, 'True')
+            .replace(/\bfalse\b/g, 'False')
+            .replace(/\bnull\b/g, 'None');
+          if (dsKind === 'linked-list' && ['head', 'list1', 'list2', 'l1', 'l2'].includes(lower)) {
+            return `${inp.name} = __array_to_list_node(${pyLit})`;
+          }
+          if (dsKind === 'tree' && ['root', 'p', 'q', 'subroot'].includes(lower)) {
+            return `${inp.name} = __array_to_tree_node(${pyLit})`;
+          }
+          return `${inp.name} = ${pyLit}`;
+        });
+        const callArgs = targetTc.inputs.map((inp) => inp.name).join(', ');
+        const hasSolutionClass = /class\s+Solution\b/.test(code);
+        const invokeLine = hasSolutionClass
+          ? `_debug_res = Solution().${methodName}(${callArgs})`
+          : `_debug_res = ${methodName}(${callArgs})`;
+        const tracedCode = `${code.trimEnd()}\n\n${argLines.join('\n')}\n${invokeLine}\nprint(_debug_res)`;
+        runDebugTrace(tracedCode, false);
+        return;
+      }
+
+      if (lang === 'java' || lang === 'c' || lang === 'cpp') {
+        runDebugTrace(code, false);
+        return;
+      }
+
+      const jsArgLines = targetTc.inputs.map((inp) => {
+        const lower = inp.name.toLowerCase();
+        if (dsKind === 'linked-list' && ['head', 'list1', 'list2', 'l1', 'l2'].includes(lower)) {
+          return `const __dbg_${inp.name} = __arrayToListNode(${inp.value});`;
+        }
+        if (dsKind === 'tree' && ['root', 'p', 'q', 'subroot'].includes(lower)) {
+          return `const __dbg_${inp.name} = __arrayToTreeNode(${inp.value});`;
+        }
+        return `const __dbg_${inp.name} = ${inp.value};`;
+      });
+      const callArgs = targetTc.inputs.map((inp) => `__dbg_${inp.name}`).join(', ');
+      const hasJsClass = /class\s+Solution\b/.test(code);
+      const invokeLine = hasJsClass
+        ? `const _debugResult = new Solution().${methodName}(${callArgs});`
+        : `const _debugResult = ${methodName}(${callArgs});`;
+      const tracedCode = `${code.trimEnd()}\n\n${jsArgLines.join('\n')}\n${invokeLine}\nconsole.log(_debugResult);`;
+      runDebugTrace(tracedCode, false);
+    },
+    [code, lang, leetcodeSpec, testCases, runDebugTrace]
   );
 
   useEffect(() => {
@@ -1090,6 +1221,18 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
             <ArrowLeft className="w-3.5 h-3.5" />
             <span>All Problems</span>
           </button>
+
+          {onOpenCommandPalette && (
+            <button
+              type="button"
+              onClick={onOpenCommandPalette}
+              title="Quick jump (Ctrl/Cmd + K)"
+              className="hidden xl:inline-flex items-center gap-1.5 px-2 py-1 rounded-md border border-neutral-800 bg-[#131317] text-[11px] font-mono text-neutral-400 hover:text-white hover:border-neutral-700 transition-colors whitespace-nowrap shrink-0"
+            >
+              <Search className="w-3 h-3" />
+              <span>⌘K</span>
+            </button>
+          )}
         </div>
 
         {/* Center Zone: Run / Submit / Visualise / Mark Solved */}
@@ -1218,12 +1361,12 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
             style={{ ['--left-pane-w' as any]: `${leftWidthPct}%` }}
             className="w-full lg:w-[var(--left-pane-w)] shrink-0 rounded-lg border border-neutral-800 bg-[#0b0b0e] flex flex-col overflow-hidden min-h-[260px] lg:min-h-0"
           >
-            <div className="flex items-center justify-between px-4 border-b border-neutral-800 bg-[#101014]">
+            <div className="flex items-center justify-between px-4 border-b border-neutral-800 bg-[#101014] overflow-x-auto">
               <div className="flex items-center gap-5 text-[11px] font-semibold uppercase tracking-wider">
                 <button
                   type="button"
                   onClick={() => setLeftTab('description')}
-                  className={`py-2.5 border-b-2 transition-colors whitespace-nowrap ${
+                  className={`py-2.5 border-b-2 transition-colors whitespace-nowrap shrink-0 ${
                     leftTab === 'description'
                       ? 'border-white text-white'
                       : 'border-transparent text-neutral-500 hover:text-neutral-300'
@@ -1234,7 +1377,7 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
                 <button
                   type="button"
                   onClick={() => setLeftTab('notes')}
-                  className={`py-2.5 border-b-2 transition-colors whitespace-nowrap ${
+                  className={`py-2.5 border-b-2 transition-colors whitespace-nowrap shrink-0 ${
                     leftTab === 'notes'
                       ? 'border-white text-white'
                       : 'border-transparent text-neutral-500 hover:text-neutral-300'
@@ -1244,13 +1387,29 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
                 </button>
                 <button
                   type="button"
+                  onClick={() => setLeftTab('submissions')}
+                  className={`py-2.5 border-b-2 transition-colors whitespace-nowrap shrink-0 inline-flex items-center gap-1.5 ${
+                    leftTab === 'submissions'
+                      ? 'border-white text-white'
+                      : 'border-transparent text-neutral-500 hover:text-neutral-300'
+                  }`}
+                >
+                  <span>Submissions</span>
+                  {submissions.length > 0 && (
+                    <span className="font-mono text-[10px] text-neutral-400 tabular-nums">
+                      ({submissions.length})
+                    </span>
+                  )}
+                </button>
+                <button
+                  type="button"
                   onClick={() => {
                     setLeftTab('visualiser');
                     if (debugSteps.length === 0 || debugDirty) {
                       runDebugTrace(code, false);
                     }
                   }}
-                  className={`py-2.5 border-b-2 transition-colors whitespace-nowrap ${
+                  className={`py-2.5 border-b-2 transition-colors whitespace-nowrap shrink-0 ${
                     leftTab === 'visualiser'
                       ? 'border-amber-400 text-amber-300'
                       : 'border-transparent text-neutral-500 hover:text-neutral-300'
@@ -1362,6 +1521,48 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
                       ))}
                     </ul>
                   </div>
+
+                  {/* Collapsible Conceptual Hints (Zero Code Spoilers) */}
+                  <div className="space-y-2 pt-3 border-t border-neutral-800/80">
+                    <div className="text-xs font-semibold text-neutral-300">
+                      Conceptual Hints
+                    </div>
+                    {conceptualHints.map((hint, idx) => {
+                      const isOpen = openHints[idx];
+                      return (
+                        <div
+                          key={idx}
+                          className="rounded-lg border border-neutral-800 bg-[#09090b] overflow-hidden"
+                        >
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setOpenHints((prev) =>
+                                idx === 0 ? [!prev[0], prev[1]] : [prev[0], !prev[1]]
+                              )
+                            }
+                            aria-expanded={isOpen}
+                            className="w-full px-3.5 py-2.5 flex items-center justify-between text-xs font-medium text-neutral-300 hover:text-white transition-colors"
+                          >
+                            <span className="inline-flex items-center gap-2">
+                              <Lightbulb className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                              <span>Hint {idx + 1}</span>
+                            </span>
+                            {isOpen ? (
+                              <ChevronUp className="w-3.5 h-3.5 text-neutral-500" />
+                            ) : (
+                              <ChevronDown className="w-3.5 h-3.5 text-neutral-500" />
+                            )}
+                          </button>
+                          {isOpen && (
+                            <div className="px-3.5 pb-3 pt-1 text-xs text-neutral-300 leading-relaxed border-t border-neutral-800/60">
+                              {hint}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
               )}
 
@@ -1387,6 +1588,101 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
                     placeholder="Jot down your time/space complexity ideas, edge cases, or approach notes..."
                     className="w-full min-h-[240px] flex-1 rounded-lg border border-neutral-800 bg-[#09090b] p-3.5 text-xs font-mono text-neutral-200 placeholder-neutral-600 focus:outline-none focus:border-emerald-500 resize-none leading-relaxed"
                   />
+                </div>
+              )}
+
+              {leftTab === 'submissions' && (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between text-xs text-neutral-400">
+                    <span>Submission history for this problem</span>
+                    <span className="font-mono tabular-nums text-neutral-500">
+                      {submissions.length} total
+                    </span>
+                  </div>
+
+                  {submissions.length === 0 ? (
+                    <div className="rounded-lg border border-neutral-800 bg-[#09090b] p-6 text-center space-y-2">
+                      <History className="w-5 h-5 text-neutral-500 mx-auto" />
+                      <div className="text-xs font-medium text-neutral-200">
+                        No submissions yet
+                      </div>
+                      <p className="text-xs text-neutral-500">
+                        Press Submit (Ctrl+Shift+Enter) to evaluate all visible &amp; hidden test cases and record your attempt here.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="rounded-lg border border-neutral-800 bg-[#09090b] divide-y divide-neutral-800/70">
+                      {submissions.map((sub) => {
+                        const accepted = sub.verdict === 'Accepted';
+                        return (
+                          <div
+                            key={sub.id}
+                            className="p-3.5 flex flex-wrap items-center justify-between gap-3 hover:bg-neutral-900/40 transition-colors"
+                          >
+                            <div className="space-y-1 min-w-0">
+                              <div className="flex items-center gap-2 text-xs">
+                                {accepted ? (
+                                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                                ) : (
+                                  <XCircle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                                )}
+                                <span
+                                  className={`font-semibold ${
+                                    accepted ? 'text-emerald-400' : 'text-rose-400'
+                                  }`}
+                                >
+                                  {sub.verdict}
+                                </span>
+                                <span className="text-neutral-600">·</span>
+                                <span className="font-mono text-neutral-400 tabular-nums">
+                                  {sub.passedCount}/{sub.totalCount} cases
+                                </span>
+                                <span className="text-neutral-600">·</span>
+                                <span className="text-neutral-400">
+                                  {LANGUAGE_LABELS[sub.language] || sub.language}
+                                </span>
+                              </div>
+
+                              <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono text-neutral-500 tabular-nums">
+                                <span>{sub.runtimeMs} ms</span>
+                                {sub.complexity && (
+                                  <>
+                                    <span>·</span>
+                                    <span>
+                                      Time {sub.complexity.time} · Space {sub.complexity.space}
+                                    </span>
+                                  </>
+                                )}
+                                <span>·</span>
+                                <span>{formatRelativeTime(sub.createdAt)}</span>
+                              </div>
+                            </div>
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (sub.language !== lang) {
+                                  setLang(sub.language);
+                                  window.setTimeout(() => {
+                                    editSeqRef.current += 1;
+                                    setCode(sub.code);
+                                    setDebugDirty(true);
+                                  }, 30);
+                                } else {
+                                  editSeqRef.current += 1;
+                                  setCode(sub.code);
+                                  setDebugDirty(true);
+                                }
+                              }}
+                              className="px-2.5 py-1 rounded border border-neutral-800 bg-neutral-900 hover:bg-neutral-800 text-[11px] font-medium text-neutral-200 transition-colors whitespace-nowrap shrink-0"
+                            >
+                              Load to Editor
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -1541,12 +1837,16 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
                   aria-label="Editor Language"
                   value={lang}
                   onChange={(e) =>
-                    setLang(e.target.value as 'python' | 'javascript')
+                    setLang(e.target.value as SolverLanguage)
                   }
                   className="bg-neutral-900 border border-neutral-800 rounded px-2.5 py-1 text-xs font-medium text-neutral-100 focus:outline-none focus:border-emerald-500 cursor-pointer"
                 >
                   <option value="python">Python 3</option>
                   <option value="javascript">JavaScript</option>
+                  <option value="typescript">TypeScript</option>
+                  <option value="java">Java</option>
+                  <option value="c">C</option>
+                  <option value="cpp">C++</option>
                 </select>
 
                 <button
@@ -1759,6 +2059,10 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
                   <span className="text-neutral-200">
                     {leetcodeSpec.isDesignClass
                       ? `class ${leetcodeSpec.methodName}`
+                      : lang === 'c'
+                      ? `${leetcodeSpec.methodName}(${leetcodeSpec.params
+                          .map((p) => p.name)
+                          .join(', ')})`
                       : `Solution.${leetcodeSpec.methodName}(${leetcodeSpec.params
                           .map((p) => p.name)
                           .join(', ')})`}
@@ -2009,7 +2313,7 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
                   <div className="space-y-3">
                     {/* LeetCode Verdict Banner */}
                     <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div className="flex items-center gap-2.5">
+                      <div className="flex flex-wrap items-center gap-2.5">
                         {judgeResult.verdict === 'Accepted' ? (
                           <span className="inline-flex items-center gap-1.5 text-sm font-bold text-emerald-400 font-sans">
                             <CheckCircle2 className="w-4 h-4" />
@@ -2026,9 +2330,28 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
                           testcases passed
                         </span>
                       </div>
-                      <span className="text-neutral-400 tabular-nums">
-                        Runtime: {judgeResult.runtimeMs} ms
-                      </span>
+                      <div className="flex flex-wrap items-center gap-3 text-neutral-400 tabular-nums">
+                        <span>Runtime: {judgeResult.runtimeMs} ms</span>
+                        {judgeResult.complexity && (
+                          <span title={judgeResult.complexity.notes.join(' · ')}>
+                            · Time: <span className="text-neutral-200">{judgeResult.complexity.time}</span> · Space:{' '}
+                            <span className="text-neutral-200">{judgeResult.complexity.space}</span>
+                          </span>
+                        )}
+                        {judgeResult.verdict === 'Accepted' &&
+                          onSelectProblem &&
+                          currentProblemIndex >= 0 &&
+                          currentProblemIndex < problems.length - 1 && (
+                            <button
+                              type="button"
+                              onClick={goNextProblem}
+                              className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-emerald-400 hover:bg-emerald-300 text-neutral-950 font-sans font-semibold text-[11px] transition-colors whitespace-nowrap"
+                            >
+                              <span>Next Problem</span>
+                              <ArrowRight className="w-3 h-3" />
+                            </button>
+                          )}
+                      </div>
                     </div>
 
                     {/* Top-level Compile / Runtime Error Box */}
@@ -2052,26 +2375,38 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
                     {/* Per-Case Verdict Tabs */}
                     {judgeResult.cases.length > 0 && (
                       <>
-                        <div className="flex flex-wrap items-center gap-1.5">
-                          {judgeResult.cases.map((c, idx) => (
-                            <button
-                              key={c.id}
-                              type="button"
-                              onClick={() => setActiveResultCaseIdx(idx)}
-                              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border text-[11px] font-medium transition-colors ${
-                                idx === activeResultCaseIdx
-                                  ? 'bg-neutral-800 border-neutral-600 text-white'
-                                  : 'bg-[#121216] border-neutral-800 text-neutral-400 hover:text-neutral-200'
-                              }`}
-                            >
-                              <span
-                                className={`w-1.5 h-1.5 rounded-full ${
-                                  c.passed ? 'bg-emerald-400' : 'bg-rose-400'
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {judgeResult.cases.map((c, idx) => (
+                              <button
+                                key={c.id}
+                                type="button"
+                                onClick={() => setActiveResultCaseIdx(idx)}
+                                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border text-[11px] font-medium transition-colors ${
+                                  idx === activeResultCaseIdx
+                                    ? 'bg-neutral-800 border-neutral-600 text-white'
+                                    : 'bg-[#121216] border-neutral-800 text-neutral-400 hover:text-neutral-200'
                                 }`}
-                              />
-                              <span>{c.label}</span>
-                            </button>
-                          ))}
+                              >
+                                <span
+                                  className={`w-1.5 h-1.5 rounded-full ${
+                                    c.passed ? 'bg-emerald-400' : 'bg-rose-400'
+                                  }`}
+                                />
+                                <span>{c.label}</span>
+                              </button>
+                            ))}
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={() => debugSpecificCase(activeResultCaseIdx)}
+                            disabled={isDebugging || !code.trim()}
+                            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded border border-amber-700/50 bg-amber-950/30 hover:bg-amber-900/40 text-[11px] font-medium text-amber-300 transition-colors disabled:opacity-40 whitespace-nowrap"
+                          >
+                            <Bug className="w-3 h-3" />
+                            <span>Debug this case</span>
+                          </button>
                         </div>
 
                         {activeResultCase && (

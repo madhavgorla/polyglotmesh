@@ -3,7 +3,10 @@ import { VisualiserWorkspaceView } from './components/VisualiserWorkspaceView';
 import { ProblemsExplorerView } from './components/visualizer/ProblemsExplorerView';
 import { ProblemSolverView } from './components/visualizer/ProblemSolverView';
 import { DailyStreakCounter } from './components/visualizer/DailyStreakCounter';
+import { CommandPalette } from './components/visualizer/CommandPalette';
 import { ALGORITHM_PROBLEMS, AlgorithmProblem } from './data/visualizerProblems';
+import { getDailyChallengeProblem } from './data/problemInsights';
+import { SolverLanguage } from './types';
 import {
   computeStreakFromDates,
   extractDatesFromTimestamps,
@@ -46,12 +49,26 @@ function readStoredTimestamps(): Record<string, string> {
 export default function App() {
   const [appMode, setAppMode] = useState<AppMode>('home');
   const [selectedProblem, setSelectedProblem] = useState<AlgorithmProblem>(ALGORITHM_PROBLEMS[0]);
-  const [solverLang, setSolverLang] = useState<'python' | 'javascript'>('python');
+  const [solverLang, setSolverLang] = useState<SolverLanguage>('python');
   const [solvedIds, setSolvedIds] = useState<string[]>(readStoredSolvedIds);
   const [solveTimestamps, setSolveTimestamps] = useState<Record<string, string>>(readStoredTimestamps);
   const [storedStreakDates, setStoredStreakDates] = useState<string[]>(
     () => readStoredDailyStreak().solvedDates
   );
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState<boolean>(false);
+
+  const dailyProblem = useMemo(() => getDailyChallengeProblem(ALGORITHM_PROBLEMS), []);
+
+  useEffect(() => {
+    const onGlobalKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setCommandPaletteOpen((open) => !open);
+      }
+    };
+    window.addEventListener('keydown', onGlobalKeyDown);
+    return () => window.removeEventListener('keydown', onGlobalKeyDown);
+  }, []);
 
   const dailyStreak = useMemo(() => {
     const fromTimestamps = extractDatesFromTimestamps(solveTimestamps);
@@ -113,7 +130,7 @@ export default function App() {
 
   const openProblemInSolver = (
     problem: AlgorithmProblem,
-    lang: 'python' | 'javascript' = 'python'
+    lang: SolverLanguage = 'python'
   ) => {
     setSelectedProblem(problem);
     setSolverLang(lang);
@@ -122,47 +139,77 @@ export default function App() {
   };
 
   const tryRandomProblem = () => {
-    const random = ALGORITHM_PROBLEMS[Math.floor(Math.random() * ALGORITHM_PROBLEMS.length)];
-    openProblemInSolver(random, 'python');
+    const unsolved = ALGORITHM_PROBLEMS.filter((p) => !solvedIds.includes(p.id));
+    const pool = unsolved.length > 0 ? unsolved : ALGORITHM_PROBLEMS;
+    const random = pool[Math.floor(Math.random() * pool.length)];
+    openProblemInSolver(random, solverLang);
   };
+
+  const renderCommandPalette = () => (
+    <CommandPalette
+      isOpen={commandPaletteOpen}
+      onClose={() => setCommandPaletteOpen(false)}
+      problems={ALGORITHM_PROBLEMS}
+      solvedIds={solvedIds}
+      dailyProblem={dailyProblem}
+      onSelectProblem={(p) => openProblemInSolver(p, solverLang)}
+      onOpenProblems={() => {
+        setAppMode('problems');
+        window.scrollTo({ top: 0, behavior: 'instant' });
+      }}
+      onGoHome={() => {
+        setAppMode('home');
+        window.scrollTo({ top: 0, behavior: 'instant' });
+      }}
+      onOpenRandomUnsolved={tryRandomProblem}
+    />
+  );
 
   // Mode 2: Dedicated Problems Explorer
   if (appMode === 'problems') {
     return (
-      <ProblemsExplorerView
-        solvedIds={solvedIds}
-        solveTimestamps={solveTimestamps}
-        dailyStreak={dailyStreak}
-        onToggleSolved={handleToggleSolved}
-        onResetProgress={handleResetProgress}
-        onSelectProblem={(problem) => openProblemInSolver(problem, 'python')}
-        onGoHome={() => {
-          setAppMode('home');
-          window.scrollTo({ top: 0, behavior: 'instant' });
-        }}
-      />
+      <>
+        {renderCommandPalette()}
+        <ProblemsExplorerView
+          solvedIds={solvedIds}
+          solveTimestamps={solveTimestamps}
+          dailyStreak={dailyStreak}
+          onToggleSolved={handleToggleSolved}
+          onResetProgress={handleResetProgress}
+          onSelectProblem={(problem) => openProblemInSolver(problem, solverLang)}
+          onOpenCommandPalette={() => setCommandPaletteOpen(true)}
+          onGoHome={() => {
+            setAppMode('home');
+            window.scrollTo({ top: 0, behavior: 'instant' });
+          }}
+        />
+      </>
     );
   }
 
   // Mode 3: Dedicated Split Problem Solver IDE
   if (appMode === 'solve') {
     return (
-      <ProblemSolverView
-        problem={selectedProblem}
-        problems={ALGORITHM_PROBLEMS}
-        solvedIds={solvedIds}
-        dailyStreak={dailyStreak}
-        initialLanguage={solverLang}
-        isSolved={solvedIds.includes(selectedProblem.id)}
-        onSelectProblem={(p) => openProblemInSolver(p, solverLang)}
-        onBackToProblems={() => setAppMode('problems')}
-        onGoHome={() => {
-          setAppMode('home');
-          window.scrollTo({ top: 0, behavior: 'instant' });
-        }}
-        onSolved={handleMarkSolved}
-        onToggleSolved={handleToggleSolved}
-      />
+      <>
+        {renderCommandPalette()}
+        <ProblemSolverView
+          problem={selectedProblem}
+          problems={ALGORITHM_PROBLEMS}
+          solvedIds={solvedIds}
+          dailyStreak={dailyStreak}
+          initialLanguage={solverLang}
+          isSolved={solvedIds.includes(selectedProblem.id)}
+          onSelectProblem={(p) => openProblemInSolver(p, solverLang)}
+          onBackToProblems={() => setAppMode('problems')}
+          onGoHome={() => {
+            setAppMode('home');
+            window.scrollTo({ top: 0, behavior: 'instant' });
+          }}
+          onSolved={handleMarkSolved}
+          onToggleSolved={handleToggleSolved}
+          onOpenCommandPalette={() => setCommandPaletteOpen(true)}
+        />
+      </>
     );
   }
 
@@ -174,6 +221,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#0a0a0a] text-neutral-100 flex flex-col font-sans">
+      {renderCommandPalette()}
       <header className="sticky top-0 z-40 w-full bg-[#0a0a0a]/90 backdrop-blur-md border-b border-neutral-900 px-4 sm:px-8 py-3.5">
         <div className="max-w-[1200px] mx-auto flex items-center justify-between gap-8">
           <a

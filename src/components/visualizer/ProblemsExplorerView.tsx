@@ -1,6 +1,7 @@
 import React, { useState, useMemo } from 'react';
-import { PanelLeftClose, PanelLeftOpen, Layers, Grid2X2, Search, Check } from 'lucide-react';
+import { PanelLeftClose, PanelLeftOpen, Layers, Grid2X2, Search, Check, ArrowRight } from 'lucide-react';
 import { ALGORITHM_PROBLEMS, ALL_TOPICS, AlgorithmProblem } from '../../data/visualizerProblems';
+import { getDailyChallengeProblem } from '../../data/problemInsights';
 import { UserProgressDashboard } from './UserProgressDashboard';
 import { DailyStreakCounter } from './DailyStreakCounter';
 import { DailyStreakState, readStoredDailyStreak } from '../../utils/dailyStreak';
@@ -13,6 +14,7 @@ interface ProblemsExplorerViewProps {
   dailyStreak?: DailyStreakState;
   onToggleSolved?: (problemId: string) => void;
   onResetProgress?: () => void;
+  onOpenCommandPalette?: () => void;
 }
 
 export const ProblemsExplorerView: React.FC<ProblemsExplorerViewProps> = ({
@@ -23,12 +25,16 @@ export const ProblemsExplorerView: React.FC<ProblemsExplorerViewProps> = ({
   dailyStreak,
   onToggleSolved,
   onResetProgress,
+  onOpenCommandPalette,
 }) => {
   const [selectedTopic, setSelectedTopic] = useState<string>('All');
   const [selectedWeek, setSelectedWeek] = useState<string>('all');
   const [selectedDifficulty, setSelectedDifficulty] = useState<'all' | 'easy' | 'medium' | 'hard'>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [sidebarOpen, setSidebarOpen] = useState(true);
+
+  const dailyProblem = useMemo(() => getDailyChallengeProblem(ALGORITHM_PROBLEMS), []);
+  const isDailySolved = solvedIds.includes(dailyProblem.id);
 
   const filteredProblems = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -160,6 +166,17 @@ export const ProblemsExplorerView: React.FC<ProblemsExplorerViewProps> = ({
                 />
               </div>
 
+              {onOpenCommandPalette && (
+                <button
+                  type="button"
+                  onClick={onOpenCommandPalette}
+                  title="Quick command jump (Ctrl/Cmd + K)"
+                  className="bg-[#111113] border border-neutral-800 hover:border-neutral-700 rounded-lg px-2.5 py-1.5 text-xs font-mono text-neutral-400 hover:text-white transition-colors whitespace-nowrap shrink-0"
+                >
+                  ⌘K
+                </button>
+              )}
+
               <select
                 aria-label="Filter by Week"
                 value={selectedWeek}
@@ -186,6 +203,56 @@ export const ProblemsExplorerView: React.FC<ProblemsExplorerViewProps> = ({
                 <option value="hard">Hard</option>
               </select>
             </div>
+          </div>
+
+          {/* Today's Challenge Strip */}
+          <div className="rounded-xl border border-neutral-800 bg-[#0d0d10] px-5 py-3.5 flex flex-wrap items-center justify-between gap-4">
+            <div className="min-w-0 space-y-1">
+              <div className="flex flex-wrap items-center gap-2 text-xs text-neutral-400">
+                <span className="font-semibold text-neutral-200">Today&apos;s Challenge</span>
+                <span aria-hidden="true">·</span>
+                <span className="font-mono tabular-nums">
+                  {new Date().toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
+                </span>
+                <span aria-hidden="true">·</span>
+                <span className={isDailySolved ? 'text-emerald-400 font-medium' : 'text-neutral-400'}>
+                  {isDailySolved ? 'Completed' : 'Unsolved'}
+                </span>
+              </div>
+              <div className="flex flex-wrap items-baseline gap-2.5">
+                {dailyProblem.leetcodeNumber && (
+                  <span className="text-xs font-mono text-neutral-500 tabular-nums">
+                    #{dailyProblem.leetcodeNumber}
+                  </span>
+                )}
+                <span className="text-sm font-semibold text-white">
+                  {dailyProblem.title}
+                </span>
+                <span className="text-xs font-mono text-neutral-500">
+                  W{dailyProblem.week || 1} · {dailyProblem.category || dailyProblem.topics[0]}
+                </span>
+                <span
+                  className={`text-xs font-medium capitalize ${
+                    dailyProblem.difficulty === 'easy'
+                      ? 'text-emerald-400'
+                      : dailyProblem.difficulty === 'hard'
+                      ? 'text-rose-400'
+                      : 'text-amber-400'
+                  }`}
+                >
+                  {dailyProblem.difficulty}
+                </span>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => onSelectProblem(dailyProblem)}
+              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-emerald-400 hover:bg-emerald-300 text-neutral-950 font-semibold text-xs transition-colors whitespace-nowrap shrink-0"
+            >
+              <span>{isDailySolved ? 'Review Challenge' : "Solve Today's Challenge"}</span>
+              <ArrowRight className="w-3.5 h-3.5" />
+            </button>
           </div>
 
           {/* User Progress Summary Dashboard */}
