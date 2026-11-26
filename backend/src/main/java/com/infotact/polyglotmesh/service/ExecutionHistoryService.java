@@ -28,6 +28,7 @@ public class ExecutionHistoryService {
         entity.setOutput(response.getOutput());
         entity.setError(response.getError());
         entity.setExecutionTimeMs(response.getExecutionTimeMs());
+        entity.setPeakMemoryKb(response.getPeakMemoryKb() != null ? response.getPeakMemoryKb() : 0L);
         entity.setSuccess(response.isSuccess());
         entity.setEngine(response.getEngine());
         entity.setExecutedAt(Instant.now());
@@ -67,6 +68,11 @@ public class ExecutionHistoryService {
                     .average()
                     .orElse(0.0);
 
+            double avgPeakKb = records.stream()
+                    .mapToLong(r -> r.getPeakMemoryKb() != null ? r.getPeakMemoryKb() : 0L)
+                    .average()
+                    .orElse(0.0);
+
             Map<String, Long> byLanguage = new LinkedHashMap<>();
             byLanguage.put("python", records.stream().filter(r -> "python".equalsIgnoreCase(r.getLanguage())).count());
             byLanguage.put("javascript", records.stream().filter(r -> "javascript".equalsIgnoreCase(r.getLanguage())).count());
@@ -77,6 +83,8 @@ public class ExecutionHistoryService {
             metrics.put("successCount", successCount);
             metrics.put("failureCount", failureCount);
             metrics.put("avgExecutionTimeMs", Math.round(avgDuration * 100.0) / 100.0);
+            metrics.put("avgPeakMemoryKb", Math.round(avgPeakKb * 100.0) / 100.0);
+            metrics.put("avgMemoryMb", Math.round((avgPeakKb / 1024.0) * 100.0) / 100.0);
             metrics.put("languageCounts", byLanguage);
             metrics.put("recentHistory", records.stream().limit(10).toList());
             return metrics;

@@ -23,6 +23,8 @@ import org.springframework.stereotype.Service;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.lang.management.ManagementFactory;
+import java.lang.management.ThreadMXBean;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -190,6 +192,10 @@ public class GraalPolyglotExecutionService {
         boolean[] isTimedOut = new boolean[]{false};
         String engineName = "GraalVM Polyglot (" + graalLang + ")";
 
+        long evalStartNs = System.nanoTime();
+        long allocBefore = readCurrentThreadAllocatedBytes();
+        long heapBefore = usedJvmHeapBytes();
+
         try {
             timeoutTask = watchdogExecutor.schedule(() -> {
                 isTimedOut[0] = true;
@@ -201,9 +207,14 @@ public class GraalPolyglotExecutionService {
             }, timeout, TimeUnit.MILLISECONDS);
 
             Source source = Source.newBuilder(graalLang, code, "untrusted-script").build();
+            evalStartNs = System.nanoTime();
+            allocBefore = readCurrentThreadAllocatedBytes();
             context.eval(source);
 
-            long elapsed = System.currentTimeMillis() - startTime;
+            long elapsed = Math.max(1L, Math.round((System.nanoTime() - evalStartNs) / 1_000_000.0));
+            long allocDelta = computeAllocatedDelta(allocBefore, heapBefore);
+            long peakKb = Math.max(1L, allocDelta / 1024L);
+            double memMb = Math.round((peakKb / 1024.0) * 100.0) / 100.0;
             String output = truncateOutput(stdoutStream.toString(StandardCharsets.UTF_8));
 
             ExecutionResponse response = ExecutionResponse.success(
@@ -213,11 +224,17 @@ public class GraalPolyglotExecutionService {
                     elapsed,
                     engineName
             );
+            response.setAllocatedBytes(allocDelta);
+            response.setPeakMemoryKb(peakKb);
+            response.setMemoryUsedMb(memMb);
             response.setSandboxAudit(sandboxPolicyFactory.createAuditSnapshot(timeout));
             return response;
 
         } catch (PolyglotException pe) {
-            long elapsed = System.currentTimeMillis() - startTime;
+            long elapsed = Math.max(1L, Math.round((System.nanoTime() - evalStartNs) / 1_000_000.0));
+            long allocDelta = computeAllocatedDelta(allocBefore, heapBefore);
+            long peakKb = Math.max(1L, allocDelta / 1024L);
+            double memMb = Math.round((peakKb / 1024.0) * 100.0) / 100.0;
             String errorMsg;
             if (isTimedOut[0] || pe.isCancelled()) {
                 errorMsg = "Execution timed out: Exceeded deadline of " + timeout + "ms. Polyglot Context interrupted.";
@@ -230,6 +247,9 @@ public class GraalPolyglotExecutionService {
             }
             String output = truncateOutput(stdoutStream.toString(StandardCharsets.UTF_8));
             ExecutionResponse response = ExecutionResponse.failure(executionId, apiLang, output, errorMsg, elapsed, engineName);
+            response.setAllocatedBytes(allocDelta);
+            response.setPeakMemoryKb(peakKb);
+            response.setMemoryUsedMb(memMb);
             response.setSandboxAudit(sandboxPolicyFactory.createAuditSnapshot(timeout));
             return response;
 
@@ -436,7 +456,16 @@ public class GraalPolyglotExecutionService {
                 }
             }, timeout, TimeUnit.MILLISECONDS);
 
+            long debugEvalStartNs = System.nanoTime();
+            long debugAllocBefore = readCurrentThreadAllocatedBytes();
+            long debugHeapBefore = usedJvmHeapBytes();
+
             context.eval(source);
+
+            long evalMs = Math.max(1L, Math.round((System.nanoTime() - debugEvalStartNs) / 1_000_000.0));
+            long debugAllocDelta = computeAllocatedDelta(debugAllocBefore, debugHeapBefore);
+            long debugPeakKb = Math.max(1L, debugAllocDelta / 1024L);
+            double debugMemMb = Math.round((debugPeakKb / 1024.0) * 100.0) / 100.0;
 
             String finalOutput = truncateOutput(stdoutStream.toString(StandardCharsets.UTF_8));
             DebugStep completionStep = new DebugStep();
@@ -450,7 +479,11 @@ public class GraalPolyglotExecutionService {
             completionStep.setCaption("Program completed");
             steps.add(completionStep);
 
-            return DebugResponse.ok(apiLang, steps, finalOutput, System.currentTimeMillis() - startTime);
+            DebugResponse okRes = DebugResponse.ok(apiLang, steps, finalOutput, evalMs);
+            okRes.setEngine("GraalVM Polyglot (" + graalLang + ")");
+            okRes.setPeakMemoryKb(debugPeakKb);
+            okRes.setMemoryUsedMb(debugMemMb);
+            return okRes;
 
         } catch (PolyglotException pe) {
             String finalOutput = truncateOutput(stdoutStream.toString(StandardCharsets.UTF_8));
@@ -606,6 +639,36 @@ public class GraalPolyglotExecutionService {
             case "ruby" -> "ruby";
             default -> null;
         };
+    }
+
+    private long readCurrentThreadAllocatedBytes() {
+        try {
+            ThreadMXBean bean = ManagementFactory.getThreadMXBean();
+            if (bean instanceof com.sun.management.ThreadMXBean sunBean && sunBean.isThreadAllocatedMemorySupported()) {
+                if (!sunBean.isThreadAllocatedMemoryEnabled()) {
+                    sunBean.setThreadAllocatedMemoryEnabled(true);
+                }
+                return sunBean.getThreadAllocatedBytes(Thread.currentThread().threadId());
+            }
+        } catch (Throwable ignored) {
+            // Fallback to heap usage delta
+        }
+        return -1L;
+    }
+
+    private long usedJvmHeapBytes() {
+        Runtime rt = Runtime.getRuntime();
+        return Math.max(0L, rt.totalMemory() - rt.freeMemory());
+    }
+
+    private long computeAllocatedDelta(long allocBefore, long heapBefore) {
+        if (allocBefore >= 0) {
+            long allocAfter = readCurrentThreadAllocatedBytes();
+            if (allocAfter >= allocBefore) {
+                return allocAfter - allocBefore;
+            }
+        }
+        return Math.max(0L, usedJvmHeapBytes() - heapBefore);
     }
 
     @PreDestroy

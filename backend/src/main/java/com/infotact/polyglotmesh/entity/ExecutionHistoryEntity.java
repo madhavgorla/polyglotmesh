@@ -23,6 +23,9 @@ public class ExecutionHistoryEntity implements Persistable<String> {
     @Column("execution_time_ms")
     private long executionTimeMs;
 
+    @Column("peak_memory_kb")
+    private Long peakMemoryKb;
+
     private boolean success;
     private String engine;
 
@@ -47,6 +50,8 @@ public class ExecutionHistoryEntity implements Persistable<String> {
     public void setError(String error) { this.error = error; }
     public long getExecutionTimeMs() { return executionTimeMs; }
     public void setExecutionTimeMs(long executionTimeMs) { this.executionTimeMs = executionTimeMs; }
+    public Long getPeakMemoryKb() { return peakMemoryKb; }
+    public void setPeakMemoryKb(Long peakMemoryKb) { this.peakMemoryKb = peakMemoryKb; }
     public boolean isSuccess() { return success; }
     public void setSuccess(boolean success) { this.success = success; }
     public String getEngine() { return engine; }

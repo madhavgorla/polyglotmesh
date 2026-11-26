@@ -8,7 +8,9 @@ import fs from 'fs';
 import * as acorn from 'acorn';
 import {
   EXTRA_RUNTIMES,
+  ExecutionTelemetryPayload,
   auditExtraLanguageSecurity,
+  buildTelemetrySnapshot,
   checkPolyglotSyntax,
   executeStandaloneNativeScript,
   judgeCompiledLanguage,
@@ -63,9 +65,59 @@ interface ExecutionRecord {
   output: string;
   error: string | null;
   executionTimeMs: number;
+  peakMemoryKb?: number;
+  memoryUsedMb?: number;
   success: boolean;
   timestamp: string;
   engine: string;
+}
+
+const GRAALVM_BACKEND_URL = (process.env.GRAALVM_BACKEND_URL || '').trim().replace(/\/+$/, '');
+
+async function tryGraalVmBackend<T = any>(
+  endpointPath: '/api/execute' | '/api/debug',
+  payload: Record<string, any>,
+  timeoutMs = 5000
+): Promise<T | null> {
+  if (!GRAALVM_BACKEND_URL) return null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), Math.min(Math.max(timeoutMs + 1500, 2500), 8000));
+  try {
+    const response = await fetch(`${GRAALVM_BACKEND_URL}${endpointPath}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
+    if (!response.ok) return null;
+    const data = (await response.json()) as any;
+    const execMs = Math.max(1, Number(data.executionTimeMs) || 1);
+    const peakKb = Math.max(
+      1,
+      Number(data.peakMemoryKb) ||
+        Math.round((Number(data.memoryUsedMb) || 0) * 1024) ||
+        1
+    );
+    const engineName = String(data.engine || 'GraalVM Polyglot Context');
+    const telemetry = buildTelemetrySnapshot({
+      executionTimeMs: execMs,
+      peakMemoryKb: peakKb,
+      memoryLimitMb: 256,
+      timeoutLimitMs: Number(payload.timeoutMs) || 3000,
+      engine: engineName,
+      backendSource: 'graalvm-backend'
+    });
+    return {
+      ...data,
+      memoryUsedMb: telemetry.memoryUsedMb,
+      peakMemoryKb: telemetry.peakMemoryKb,
+      telemetry
+    } as T;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // Persistent JSON store in .data/polyglotmesh-store.json so scripts & history survive restarts
@@ -254,7 +306,9 @@ function recordHistory(
   error: string | null,
   executionTimeMs: number,
   success: boolean,
-  engine: string
+  engine: string,
+  peakMemoryKb?: number,
+  memoryUsedMb?: number
 ) {
   store.history.unshift({
     id: executionId,
@@ -263,6 +317,8 @@ function recordHistory(
     output: output.slice(0, 400),
     error,
     executionTimeMs,
+    ...(typeof peakMemoryKb === 'number' ? { peakMemoryKb } : {}),
+    ...(typeof memoryUsedMb === 'number' ? { memoryUsedMb } : {}),
     success,
     timestamp: new Date().toISOString(),
     engine
@@ -675,10 +731,70 @@ app.post('/api/debug', async (req: Request, res: Response) => {
 
   const deadline = Math.min(Math.max(Number(timeoutMs) || 3000, 500), 5000);
 
+  if (normalizedLang === 'python' || normalizedLang === 'javascript' || normalizedLang === 'ruby') {
+    const graalDebug = await tryGraalVmBackend('/api/debug', {
+      language: normalizedLang,
+      code,
+      timeoutMs: deadline
+    }, deadline);
+    if (graalDebug) {
+      return res.json(graalDebug);
+    }
+  }
+
   if (normalizedLang === 'java' || normalizedLang === 'c' || normalizedLang === 'cpp') {
+    const engineName =
+      normalizedLang === 'java'
+        ? 'OpenJDK 17 JVM'
+        : normalizedLang === 'cpp'
+        ? 'G++ C++17 Native Binary'
+        : 'GCC C11 Native Binary';
+    const isRuntimeAvailable =
+      normalizedLang === 'java'
+        ? EXTRA_RUNTIMES.java
+        : normalizedLang === 'cpp'
+        ? EXTRA_RUNTIMES.cpp
+        : EXTRA_RUNTIMES.c;
+    if (!isRuntimeAvailable) {
+      const msg =
+        normalizedLang === 'java'
+          ? 'Java JDK (javac/java) is unavailable in this environment.'
+          : normalizedLang === 'cpp'
+          ? 'G++ (C++17) compiler is unavailable in this environment.'
+          : 'GCC (C11) compiler is unavailable in this environment.';
+      return res.json({
+        success: false,
+        language: normalizedLang,
+        steps: [
+          {
+            step: 1,
+            line: 1,
+            event: 'exception',
+            functionName: '<runtime>',
+            locals: {},
+            stack: [{ functionName: '<runtime>', line: 1, locals: {} }],
+            stdout: '',
+            error: { type: 'RuntimeUnavailable', message: msg, line: 1 },
+            caption: msg
+          }
+        ],
+        syntaxError: null,
+        runtimeError: { type: 'RuntimeUnavailable', message: msg, line: 1 },
+        finalOutput: '',
+        executionTimeMs: 0,
+        engine: engineName
+      });
+    }
     const syntax = await checkPolyglotSyntax(normalizedLang, code);
     if (!syntax.valid && syntax.errors.length > 0) {
       const err = syntax.errors[0];
+      const elapsed = Math.max(1, Date.now() - startTime);
+      const telemetry = buildTelemetrySnapshot({
+        executionTimeMs: elapsed,
+        peakMemoryKb: 1,
+        timeoutLimitMs: deadline,
+        engine: engineName
+      });
       return res.json({
         success: false,
         language: normalizedLang,
@@ -698,7 +814,11 @@ app.post('/api/debug', async (req: Request, res: Response) => {
         syntaxError: { line: err.line, column: err.column, message: err.message },
         runtimeError: null,
         finalOutput: '',
-        executionTimeMs: Date.now() - startTime
+        executionTimeMs: elapsed,
+        memoryUsedMb: telemetry.memoryUsedMb,
+        peakMemoryKb: telemetry.peakMemoryKb,
+        engine: engineName,
+        telemetry
       });
     }
 
@@ -727,10 +847,21 @@ app.post('/api/debug', async (req: Request, res: Response) => {
         syntaxError: null,
         runtimeError: execRes.error ? { type: 'RuntimeError', message: execRes.error, line: 1 } : null,
         finalOutput: execRes.output,
-        executionTimeMs: Date.now() - startTime
+        executionTimeMs: execRes.executionTimeMs,
+        memoryUsedMb: execRes.memoryUsedMb,
+        peakMemoryKb: execRes.peakMemoryKb,
+        engine: execRes.engine,
+        telemetry: execRes.telemetry
       });
     }
 
+    const elapsed = Math.max(1, Date.now() - startTime);
+    const telemetry = buildTelemetrySnapshot({
+      executionTimeMs: elapsed,
+      peakMemoryKb: 64,
+      timeoutLimitMs: deadline,
+      engine: engineName
+    });
     return res.json({
       success: true,
       language: normalizedLang,
@@ -750,13 +881,20 @@ app.post('/api/debug', async (req: Request, res: Response) => {
       syntaxError: null,
       runtimeError: null,
       finalOutput: '',
-      executionTimeMs: Date.now() - startTime
+      executionTimeMs: elapsed,
+      memoryUsedMb: telemetry.memoryUsedMb,
+      peakMemoryKb: telemetry.peakMemoryKb,
+      engine: engineName,
+      telemetry
     });
   }
 
   let debugSourceCode = code;
+  let tsCompileTimeMs: number | undefined;
   if (normalizedLang === 'typescript') {
+    const tsCompileStart = Date.now();
     const tsOut = transpileTypeScript(code);
+    tsCompileTimeMs = Date.now() - tsCompileStart;
     if (!tsOut.ok || !tsOut.jsCode) {
       const err = tsOut.error || { line: 1, column: 1, message: 'TypeScript syntax error' };
       return res.json({
@@ -1001,10 +1139,28 @@ app.post('/api/debug', async (req: Request, res: Response) => {
 
       const context = vm.createContext(sandbox);
       const script = new vm.Script(instrumented);
+      const memBefore = process.memoryUsage();
+      const execStartNs = process.hrtime.bigint();
       try {
         script.runInContext(context, { timeout: deadline, breakOnSigint: true });
       } catch (runErr: any) {
         if (runErr?.message !== '__TRACE_LIMIT__') {
+          const execMs = Math.max(1, Number(process.hrtime.bigint() - execStartNs) / 1e6);
+          const memAfter = process.memoryUsage();
+          const deltaKb = Math.max(
+            Math.round((memAfter.heapUsed - memBefore.heapUsed) / 1024),
+            Math.round((memAfter.external - memBefore.external) / 1024),
+            Math.round((memAfter.heapUsed * 0.05) / 1024),
+            64
+          );
+          const engineName = normalizedLang === 'typescript' ? 'esbuild TS + Node VM Trace' : 'Node VM Trace (GraalJS Compatible)';
+          const telemetry = buildTelemetrySnapshot({
+            executionTimeMs: execMs,
+            compileTimeMs: tsCompileTimeMs,
+            peakMemoryKb: deltaKb,
+            timeoutLimitMs: deadline,
+            engine: engineName
+          });
           const errType = runErr?.name || 'Error';
           const isTimeout = runErr?.message && runErr.message.includes('timed out');
           const errMsg = isTimeout
@@ -1025,31 +1181,56 @@ app.post('/api/debug', async (req: Request, res: Response) => {
           });
           return res.json({
             success: false,
-            language: 'javascript',
+            language: normalizedLang,
             steps,
             syntaxError: null,
             runtimeError: errObj,
             finalOutput: logs.join('\n'),
-            executionTimeMs: Date.now() - startTime,
+            executionTimeMs: telemetry.executionTimeMs,
+            memoryUsedMb: telemetry.memoryUsedMb,
+            peakMemoryKb: telemetry.peakMemoryKb,
+            engine: engineName,
+            telemetry,
             truncated
           });
         }
       }
 
+      const execMs = Math.max(1, Number(process.hrtime.bigint() - execStartNs) / 1e6);
+      const memAfter = process.memoryUsage();
+      const deltaKb = Math.max(
+        Math.round((memAfter.heapUsed - memBefore.heapUsed) / 1024),
+        Math.round((memAfter.external - memBefore.external) / 1024),
+        Math.round((memAfter.heapUsed * 0.05) / 1024),
+        64
+      );
+      const engineName = normalizedLang === 'typescript' ? 'esbuild TS + Node VM Trace' : 'Node VM Trace (GraalJS Compatible)';
+      const telemetry = buildTelemetrySnapshot({
+        executionTimeMs: execMs,
+        compileTimeMs: tsCompileTimeMs,
+        peakMemoryKb: deltaKb,
+        timeoutLimitMs: deadline,
+        engine: engineName
+      });
+
       return res.json({
         success: true,
-        language: 'javascript',
+        language: normalizedLang,
         steps,
         syntaxError: null,
         runtimeError: null,
         finalOutput: logs.join('\n'),
-        executionTimeMs: Date.now() - startTime,
+        executionTimeMs: telemetry.executionTimeMs,
+        memoryUsedMb: telemetry.memoryUsedMb,
+        peakMemoryKb: telemetry.peakMemoryKb,
+        engine: engineName,
+        telemetry,
         truncated
       });
     } catch (err: any) {
       return res.json({
         success: false,
-        language: 'javascript',
+        language: normalizedLang,
         steps: [],
         runtimeError: { type: 'DebuggerError', message: err.message || 'Failed to instrument JS', line: 1 },
         finalOutput: '',
@@ -1071,7 +1252,7 @@ app.post('/api/debug', async (req: Request, res: Response) => {
   }
 
   const pyDebugHarness = `
-import ast, io, json, sys, traceback, math, heapq, bisect, collections
+import ast, io, json, sys, traceback, math, heapq, bisect, collections, time, tracemalloc, resource
 from collections import defaultdict, deque, Counter
 from typing import List, Dict, Set, Tuple, Optional, Any, Callable
 
@@ -1270,6 +1451,8 @@ def tracer(frame, event, arg):
     return tracer
 
 runtime_err = None
+tracemalloc.start()
+__pm_t0 = time.perf_counter_ns()
 try:
     compiled = compile(user_code, "<user_code>", "exec")
     ns = {
@@ -1317,6 +1500,23 @@ finally:
     sys.settrace(None)
     sys.stdout = old_stdout
 
+__pm_exec_ms = max(1, round((time.perf_counter_ns() - __pm_t0) / 1_000_000, 2))
+_, __pm_peak_b = tracemalloc.get_traced_memory()
+tracemalloc.stop()
+__pm_rss_kb = 0
+try:
+    with open("/proc/self/status") as __sf:
+        for __line in __sf:
+            if __line.startswith("VmHWM:"):
+                __pm_rss_kb = int(__line.split()[1])
+                break
+            elif __line.startswith("VmRSS:") and __pm_rss_kb == 0:
+                __pm_rss_kb = int(__line.split()[1])
+except Exception:
+    pass
+if __pm_rss_kb <= 0:
+    __pm_rss_kb = max(1, int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss))
+
 print(json.dumps({
     "success": runtime_err is None,
     "language": "python",
@@ -1324,7 +1524,10 @@ print(json.dumps({
     "syntaxError": None,
     "runtimeError": runtime_err,
     "finalOutput": stdout_buf.getvalue(),
-    "truncated": truncated
+    "truncated": truncated,
+    "execMs": __pm_exec_ms,
+    "peakMemoryKb": __pm_rss_kb,
+    "tracedHeapKb": max(1, round(__pm_peak_b / 1024))
 }))
 `;
 
@@ -1360,8 +1563,15 @@ print(json.dumps({
 
   py.on('close', () => {
     clearTimeout(timer);
-    const elapsed = Date.now() - startTime;
+    const elapsed = Math.max(1, Date.now() - startTime);
+    const pyEngine = 'Python 3 Isolated Trace (GraalPy Compatible)';
     if (timedOut) {
+      const telemetry = buildTelemetrySnapshot({
+        executionTimeMs: elapsed,
+        peakMemoryKb: 1024,
+        timeoutLimitMs: deadline,
+        engine: pyEngine
+      });
       return res.json({
         success: false,
         language: 'python',
@@ -1372,14 +1582,28 @@ print(json.dumps({
           line: 1
         },
         finalOutput: '',
-        executionTimeMs: elapsed
+        executionTimeMs: elapsed,
+        memoryUsedMb: telemetry.memoryUsedMb,
+        peakMemoryKb: telemetry.peakMemoryKb,
+        engine: pyEngine,
+        telemetry
       });
     }
     try {
       const parsed = JSON.parse(stdout);
+      const telemetry = buildTelemetrySnapshot({
+        executionTimeMs: Number(parsed.execMs) || elapsed,
+        peakMemoryKb: Number(parsed.peakMemoryKb) || Number(parsed.tracedHeapKb) || 512,
+        timeoutLimitMs: deadline,
+        engine: pyEngine
+      });
       return res.json({
         ...parsed,
-        executionTimeMs: elapsed
+        executionTimeMs: telemetry.executionTimeMs,
+        memoryUsedMb: telemetry.memoryUsedMb,
+        peakMemoryKb: telemetry.peakMemoryKb,
+        engine: pyEngine,
+        telemetry
       });
     } catch {
       return res.json({
@@ -1511,26 +1735,66 @@ app.post('/api/execute', async (req: Request, res: Response) => {
   const deadline = Math.min(Math.max(Number(timeoutMs) || 3000, 500), 5000);
 
   try {
+    if (normalizedLang === 'python' || normalizedLang === 'javascript' || normalizedLang === 'ruby') {
+      const graalExec = await tryGraalVmBackend('/api/execute', {
+        language: normalizedLang,
+        code,
+        timeoutMs: deadline
+      }, deadline);
+      if (graalExec) {
+        recordHistory(
+          executionId,
+          normalizedLang,
+          code,
+          String(graalExec.output || ''),
+          graalExec.error || null,
+          graalExec.telemetry?.executionTimeMs ?? graalExec.executionTimeMs ?? 1,
+          Boolean(graalExec.success),
+          graalExec.engine || 'GraalVM Polyglot Engine',
+          graalExec.telemetry?.peakMemoryKb,
+          graalExec.telemetry?.memoryUsedMb
+        );
+        return res.json({ ...graalExec, executionId });
+      }
+    }
+
     if (normalizedLang === 'java' || normalizedLang === 'c' || normalizedLang === 'cpp') {
       const execRes = await executeStandaloneNativeScript(normalizedLang, code, deadline);
-      const elapsed = Date.now() - startTime;
-      recordHistory(executionId, normalizedLang, code, execRes.output, execRes.error, elapsed, execRes.success, execRes.engine);
+      const execMs = execRes.executionTimeMs || Math.max(1, Date.now() - startTime);
+      recordHistory(
+        executionId,
+        normalizedLang,
+        code,
+        execRes.output,
+        execRes.error,
+        execMs,
+        execRes.success,
+        execRes.engine,
+        execRes.peakMemoryKb,
+        execRes.memoryUsedMb
+      );
       return res.json({
         success: execRes.success,
         executionId,
         language: normalizedLang,
         output: execRes.output,
         error: execRes.error,
-        executionTimeMs: elapsed,
-        engine: execRes.engine
+        executionTimeMs: execMs,
+        memoryUsedMb: execRes.memoryUsedMb,
+        peakMemoryKb: execRes.peakMemoryKb,
+        engine: execRes.engine,
+        telemetry: execRes.telemetry
       });
     }
 
     let execJsCode = code;
+    let tsCompileTimeMs: number | undefined;
     if (normalizedLang === 'typescript') {
+      const tsCompileStart = Date.now();
       const tsOut = transpileTypeScript(code);
+      tsCompileTimeMs = Date.now() - tsCompileStart;
       if (!tsOut.ok || !tsOut.jsCode) {
-        const elapsed = Date.now() - startTime;
+        const elapsed = Math.max(1, Date.now() - startTime);
         const errMsg = `CompileError (Line ${tsOut.error?.line || 1}): ${tsOut.error?.message || 'Syntax error'}`;
         recordHistory(executionId, 'typescript', code, '', errMsg, elapsed, false, 'TypeScript Transpiler');
         return res.json({
@@ -1572,6 +1836,8 @@ app.post('/api/execute', async (req: Request, res: Response) => {
 
       const context = vm.createContext(sandbox);
       const script = new vm.Script(execJsCode);
+      const memBefore = process.memoryUsage();
+      const evalStartNs = process.hrtime.bigint();
 
       try {
         const evalResult = script.runInContext(context, {
@@ -1583,9 +1849,39 @@ app.post('/api/execute', async (req: Request, res: Response) => {
           logs.push(typeof evalResult === 'object' ? JSON.stringify(evalResult, null, 2) : String(evalResult));
         }
 
-        const elapsed = Date.now() - startTime;
+        const evalMs = Math.max(1, Number(process.hrtime.bigint() - evalStartNs) / 1e6);
+        const memAfter = process.memoryUsage();
+        const peakKb = Math.max(
+          Math.round((memAfter.heapUsed - memBefore.heapUsed) / 1024),
+          Math.round((memAfter.external - memBefore.external) / 1024),
+          Math.round((memAfter.heapUsed * 0.05) / 1024),
+          64
+        );
+        const engineName =
+          normalizedLang === 'typescript'
+            ? 'esbuild TypeScript + Isolated VM'
+            : 'JavaScript Isolated VM (GraalJS Compatible)';
+        const telemetry = buildTelemetrySnapshot({
+          executionTimeMs: evalMs,
+          compileTimeMs: tsCompileTimeMs,
+          peakMemoryKb: peakKb,
+          timeoutLimitMs: deadline,
+          engine: engineName
+        });
+
         const output = logs.join('\n') || '(Execution finished with no console output)';
-        recordHistory(executionId, normalizedLang, code, output, null, elapsed, true, 'JavaScript Isolated VM');
+        recordHistory(
+          executionId,
+          normalizedLang,
+          code,
+          output,
+          null,
+          telemetry.executionTimeMs,
+          true,
+          engineName,
+          telemetry.peakMemoryKb,
+          telemetry.memoryUsedMb
+        );
 
         return res.json({
           success: true,
@@ -1593,8 +1889,11 @@ app.post('/api/execute', async (req: Request, res: Response) => {
           language: normalizedLang,
           output,
           error: null,
-          executionTimeMs: elapsed,
-          engine: 'JavaScript Isolated VM (GraalJS Compatible)',
+          executionTimeMs: telemetry.executionTimeMs,
+          memoryUsedMb: telemetry.memoryUsedMb,
+          peakMemoryKb: telemetry.peakMemoryKb,
+          engine: engineName,
+          telemetry,
           sandboxAudit: {
             hostAccessDenied: true,
             ioDenied: true,
@@ -1604,14 +1903,42 @@ app.post('/api/execute', async (req: Request, res: Response) => {
           }
         });
       } catch (runErr: any) {
-        const elapsed = Date.now() - startTime;
+        const evalMs = Math.max(1, Number(process.hrtime.bigint() - evalStartNs) / 1e6);
+        const memAfter = process.memoryUsage();
+        const peakKb = Math.max(
+          Math.round((memAfter.heapUsed - memBefore.heapUsed) / 1024),
+          Math.round((memAfter.heapUsed * 0.05) / 1024),
+          64
+        );
+        const engineName =
+          normalizedLang === 'typescript'
+            ? 'esbuild TypeScript + Isolated VM'
+            : 'JavaScript Isolated VM (GraalJS Compatible)';
+        const telemetry = buildTelemetrySnapshot({
+          executionTimeMs: evalMs,
+          compileTimeMs: tsCompileTimeMs,
+          peakMemoryKb: peakKb,
+          timeoutLimitMs: deadline,
+          engine: engineName
+        });
         const isTimeout = runErr.message && runErr.message.includes('timed out');
         const errorMsg = isTimeout
           ? `Execution timed out: Exceeded deadline of ${deadline}ms. Guest execution interrupted.`
           : (runErr.message || 'Execution error');
 
         const output = logs.join('\n');
-        recordHistory(executionId, normalizedLang, code, output, errorMsg, elapsed, false, 'JavaScript Isolated VM');
+        recordHistory(
+          executionId,
+          normalizedLang,
+          code,
+          output,
+          errorMsg,
+          telemetry.executionTimeMs,
+          false,
+          engineName,
+          telemetry.peakMemoryKb,
+          telemetry.memoryUsedMb
+        );
 
         return res.json({
           success: false,
@@ -1619,8 +1946,11 @@ app.post('/api/execute', async (req: Request, res: Response) => {
           language: normalizedLang,
           output,
           error: errorMsg,
-          executionTimeMs: elapsed,
-          engine: 'JavaScript Isolated VM (GraalJS Compatible)',
+          executionTimeMs: telemetry.executionTimeMs,
+          memoryUsedMb: telemetry.memoryUsedMb,
+          peakMemoryKb: telemetry.peakMemoryKb,
+          engine: engineName,
+          telemetry,
           sandboxAudit: {
             hostAccessDenied: true,
             ioDenied: true,
@@ -1632,9 +1962,43 @@ app.post('/api/execute', async (req: Request, res: Response) => {
       }
     }
 
-    // Python execution via isolated Python 3 process (-I isolated mode)
+    // Python execution via isolated Python 3 process (-I isolated mode) with real memory & timing
     if (normalizedLang === 'python') {
-      const pyProcess = spawn('python3', ['-I', '-c', code], {
+      const pyRunnerWrapper = `
+import sys, time, tracemalloc, resource, json
+user_src = sys.argv[1]
+tracemalloc.start()
+__t0 = time.perf_counter_ns()
+__err_code = 0
+try:
+    __compiled = compile(user_src, "<script>", "exec")
+    exec(__compiled, {"__name__": "__main__"})
+except BaseException:
+    import traceback
+    traceback.print_exc(file=sys.stderr)
+    __err_code = 1
+finally:
+    __exec_ms = max(1, round((time.perf_counter_ns() - __t0) / 1_000_000, 2))
+    _, __peak_b = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    __rss_kb = 0
+    try:
+        with open("/proc/self/status") as __sf:
+            for __line in __sf:
+                if __line.startswith("VmHWM:"):
+                    __rss_kb = int(__line.split()[1])
+                    break
+                elif __line.startswith("VmRSS:") and __rss_kb == 0:
+                    __rss_kb = int(__line.split()[1])
+    except Exception:
+        pass
+    if __rss_kb <= 0:
+        __rss_kb = max(1, int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss))
+    print("\\n__PM_EXEC_METRICS__=" + json.dumps({"execMs": __exec_ms, "peakMemoryKb": __rss_kb, "tracedHeapKb": max(1, round(__peak_b / 1024))}), flush=True)
+if __err_code != 0:
+    sys.exit(__err_code)
+`;
+      const pyProcess = spawn('python3', ['-I', '-c', pyRunnerWrapper, code], {
         timeout: deadline,
         env: {
           PYTHONUNBUFFERED: '1',
@@ -1664,46 +2028,109 @@ app.post('/api/execute', async (req: Request, res: Response) => {
 
       pyProcess.on('close', (exitCode) => {
         clearTimeout(timer);
-        const elapsed = Date.now() - startTime;
+        const wallElapsed = Math.max(1, Date.now() - startTime);
+        const markerMatch = stdoutData.match(/\n?__PM_EXEC_METRICS__=(\{[^\n]+\})\s*$/);
+        let cleanStdout = stdoutData;
+        let execMs = wallElapsed;
+        let peakMemoryKb = 1024;
+        if (markerMatch) {
+          cleanStdout = stdoutData.slice(0, markerMatch.index).trimEnd();
+          try {
+            const m = JSON.parse(markerMatch[1]);
+            if (typeof m.execMs === 'number' && m.execMs > 0) execMs = m.execMs;
+            if (typeof m.peakMemoryKb === 'number' && m.peakMemoryKb > 0) peakMemoryKb = m.peakMemoryKb;
+          } catch {
+            // Keep defaults
+          }
+        }
+        const pyEngine = 'Python 3 Isolated Runtime (GraalPy Compatible)';
+        const telemetry = buildTelemetrySnapshot({
+          executionTimeMs: execMs,
+          peakMemoryKb,
+          timeoutLimitMs: deadline,
+          engine: pyEngine
+        });
 
         if (timedOut) {
           const errorMsg = `Execution timed out: Exceeded deadline of ${deadline}ms. Process terminated via SIGKILL.`;
-          recordHistory(executionId, normalizedLang, code, stdoutData, errorMsg, elapsed, false, 'Python 3 Isolated Runtime');
+          recordHistory(
+            executionId,
+            normalizedLang,
+            code,
+            cleanStdout,
+            errorMsg,
+            telemetry.executionTimeMs,
+            false,
+            pyEngine,
+            telemetry.peakMemoryKb,
+            telemetry.memoryUsedMb
+          );
           return res.json({
             success: false,
             executionId,
             language: normalizedLang,
-            output: stdoutData,
+            output: cleanStdout,
             error: errorMsg,
-            executionTimeMs: elapsed,
-            engine: 'Python 3 Isolated Runtime (GraalPy Compatible)'
+            executionTimeMs: telemetry.executionTimeMs,
+            memoryUsedMb: telemetry.memoryUsedMb,
+            peakMemoryKb: telemetry.peakMemoryKb,
+            engine: pyEngine,
+            telemetry
           });
         }
 
         if (exitCode !== 0) {
           const errorMsg = stderrData.trim() || `Execution failed with exit code ${exitCode}`;
-          recordHistory(executionId, normalizedLang, code, stdoutData, errorMsg, elapsed, false, 'Python 3 Isolated Runtime');
+          recordHistory(
+            executionId,
+            normalizedLang,
+            code,
+            cleanStdout,
+            errorMsg,
+            telemetry.executionTimeMs,
+            false,
+            pyEngine,
+            telemetry.peakMemoryKb,
+            telemetry.memoryUsedMb
+          );
           return res.json({
             success: false,
             executionId,
             language: normalizedLang,
-            output: stdoutData,
+            output: cleanStdout,
             error: errorMsg,
-            executionTimeMs: elapsed,
-            engine: 'Python 3 Isolated Runtime (GraalPy Compatible)'
+            executionTimeMs: telemetry.executionTimeMs,
+            memoryUsedMb: telemetry.memoryUsedMb,
+            peakMemoryKb: telemetry.peakMemoryKb,
+            engine: pyEngine,
+            telemetry
           });
         }
 
-        const finalOutput = stdoutData || '(Script executed successfully with no stdout)';
-        recordHistory(executionId, normalizedLang, code, finalOutput, null, elapsed, true, 'Python 3 Isolated Runtime');
+        const finalOutput = cleanStdout || '(Script executed successfully with no stdout)';
+        recordHistory(
+          executionId,
+          normalizedLang,
+          code,
+          finalOutput,
+          null,
+          telemetry.executionTimeMs,
+          true,
+          pyEngine,
+          telemetry.peakMemoryKb,
+          telemetry.memoryUsedMb
+        );
         return res.json({
           success: true,
           executionId,
           language: normalizedLang,
           output: finalOutput,
           error: null,
-          executionTimeMs: elapsed,
-          engine: 'Python 3 Isolated Runtime (GraalPy Compatible)',
+          executionTimeMs: telemetry.executionTimeMs,
+          memoryUsedMb: telemetry.memoryUsedMb,
+          peakMemoryKb: telemetry.peakMemoryKb,
+          engine: pyEngine,
+          telemetry,
           sandboxAudit: {
             hostAccessDenied: true,
             ioDenied: true,
@@ -1814,6 +2241,7 @@ app.post('/api/judge', async (req: Request, res: Response) => {
 
   const deadline = Math.min(Math.max(Number(timeoutMs) || 3000, 500), 5000);
   const safeCases = Array.isArray(testCases) ? testCases : [];
+  const judgeExecId = 'judge-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
 
   if (normalizedLang === 'java' || normalizedLang === 'c' || normalizedLang === 'cpp') {
     const result = await judgeCompiledLanguage({
@@ -1828,18 +2256,57 @@ app.post('/api/judge', async (req: Request, res: Response) => {
       testCases: safeCases,
       timeoutMs: deadline
     });
+    recordHistory(
+      judgeExecId,
+      normalizedLang,
+      code,
+      `${result.verdict} (${result.passedCount}/${result.totalCount} cases)`,
+      result.errorMessage || null,
+      result.telemetry?.executionTimeMs ?? result.runtimeMs ?? 1,
+      result.verdict === 'Accepted',
+      result.telemetry?.engine || normalizedLang.toUpperCase(),
+      result.telemetry?.peakMemoryKb ?? result.peakMemoryKb,
+      result.telemetry?.memoryUsedMb ?? result.memoryUsedMb
+    );
     return res.json(result);
   }
 
   let jsExecutionSource = code;
+  let tsJudgeCompileMs: number | undefined;
   if (normalizedLang === 'typescript') {
+    const tsCompileStart = Date.now();
     const tsOut = transpileTypeScript(code);
+    tsJudgeCompileMs = Date.now() - tsCompileStart;
     if (!tsOut.ok || !tsOut.jsCode) {
+      const elapsed = Math.max(1, Date.now() - startTime);
+      const telemetry = buildTelemetrySnapshot({
+        executionTimeMs: elapsed,
+        compileTimeMs: tsJudgeCompileMs,
+        peakMemoryKb: 1,
+        timeoutLimitMs: deadline,
+        engine: 'esbuild TypeScript Compiler'
+      });
+      recordHistory(
+        judgeExecId,
+        'typescript',
+        code,
+        'Compile Error',
+        tsOut.error?.message || 'TypeScript compilation error',
+        elapsed,
+        false,
+        telemetry.engine,
+        telemetry.peakMemoryKb,
+        telemetry.memoryUsedMb
+      );
       return res.json({
         verdict: 'Compile Error',
         passedCount: 0,
         totalCount: safeCases.length,
-        runtimeMs: Date.now() - startTime,
+        runtimeMs: elapsed,
+        compileTimeMs: tsJudgeCompileMs,
+        memoryUsedMb: telemetry.memoryUsedMb,
+        peakMemoryKb: telemetry.peakMemoryKb,
+        telemetry,
         cases: [],
         errorLine: tsOut.error?.line || 1,
         errorMessage: tsOut.error?.message || 'TypeScript compilation error'
@@ -2103,21 +2570,64 @@ app.post('/api/judge', async (req: Request, res: Response) => {
     };
 
     const context = vm.createContext(sandbox);
+    const jsEngineName =
+      normalizedLang === 'typescript'
+        ? 'esbuild TS + Node VM Judge'
+        : 'Node VM Judge (GraalJS Compatible)';
+    const memBefore = process.memoryUsage();
+    const evalStartNs = process.hrtime.bigint();
+    let peakDeltaBytes = 0;
+    const sampleJsMemory = () => {
+      const m = process.memoryUsage();
+      const delta = Math.max(
+        m.heapUsed - memBefore.heapUsed,
+        m.external - memBefore.external,
+        Math.round(m.heapUsed * 0.05)
+      );
+      if (delta > peakDeltaBytes) peakDeltaBytes = delta;
+    };
 
     try {
       const userScript = new vm.Script(jsExecutionSource, { filename: 'solution.js' });
       userScript.runInContext(context, { timeout: deadline, breakOnSigint: true });
+      sampleJsMemory();
     } catch (runErr: any) {
+      sampleJsMemory();
+      const evalMs = Math.max(1, Number(process.hrtime.bigint() - evalStartNs) / 1e6);
+      const telemetry = buildTelemetrySnapshot({
+        executionTimeMs: evalMs,
+        compileTimeMs: tsJudgeCompileMs,
+        peakMemoryKb: Math.max(64, Math.round(peakDeltaBytes / 1024)),
+        timeoutLimitMs: deadline,
+        engine: jsEngineName
+      });
       const isTimeout = runErr?.message?.includes('timed out');
       const lineMatch = String(runErr?.stack || '').match(/solution\.js:(\d+)/);
+      const errMsg = isTimeout ? `Time Limit Exceeded (${deadline}ms)` : (runErr?.message || 'Runtime Error');
+      recordHistory(
+        judgeExecId,
+        normalizedLang,
+        code,
+        isTimeout ? 'Time Limit Exceeded' : 'Runtime Error',
+        errMsg,
+        telemetry.executionTimeMs,
+        false,
+        jsEngineName,
+        telemetry.peakMemoryKb,
+        telemetry.memoryUsedMb
+      );
       return res.json({
         verdict: isTimeout ? 'Time Limit Exceeded' : 'Runtime Error',
         passedCount: 0,
         totalCount: safeCases.length,
-        runtimeMs: Date.now() - startTime,
+        runtimeMs: telemetry.executionTimeMs,
+        compileTimeMs: tsJudgeCompileMs,
+        memoryUsedMb: telemetry.memoryUsedMb,
+        peakMemoryKb: telemetry.peakMemoryKb,
+        telemetry,
         cases: [],
         errorLine: lineMatch ? parseInt(lineMatch[1], 10) : 1,
-        errorMessage: isTimeout ? `Time Limit Exceeded (${deadline}ms)` : (runErr?.message || 'Runtime Error')
+        errorMessage: errMsg
       });
     }
 
@@ -2162,15 +2672,40 @@ app.post('/api/judge', async (req: Request, res: Response) => {
 
     // Fallback: standalone script using console.log
     if (!targetFn) {
+      sampleJsMemory();
+      const evalMs = Math.max(1, Number(process.hrtime.bigint() - evalStartNs) / 1e6);
+      const telemetry = buildTelemetrySnapshot({
+        executionTimeMs: evalMs,
+        compileTimeMs: tsJudgeCompileMs,
+        peakMemoryKb: Math.max(64, Math.round(peakDeltaBytes / 1024)),
+        timeoutLimitMs: deadline,
+        engine: jsEngineName
+      });
       const expectedStr = (expectedPrintSubstring || safeCases[0]?.expectedDisplay || '').trim();
       const normalizedExpected = expectedStr.replace(/^["']|["']$/g, '').toLowerCase();
       const passed = normalizedExpected ? globalStdout.toLowerCase().includes(normalizedExpected) : globalStdout.length > 0;
-      const elapsed = Date.now() - startTime;
+      const verdict = passed ? 'Accepted' : 'Wrong Answer';
+      recordHistory(
+        judgeExecId,
+        normalizedLang,
+        code,
+        `${verdict} (${passed ? 1 : 0}/1 cases)`,
+        null,
+        telemetry.executionTimeMs,
+        passed,
+        jsEngineName,
+        telemetry.peakMemoryKb,
+        telemetry.memoryUsedMb
+      );
       return res.json({
-        verdict: passed ? 'Accepted' : 'Wrong Answer',
+        verdict,
         passedCount: passed ? 1 : 0,
         totalCount: 1,
-        runtimeMs: elapsed,
+        runtimeMs: telemetry.executionTimeMs,
+        compileTimeMs: tsJudgeCompileMs,
+        memoryUsedMb: telemetry.memoryUsedMb,
+        peakMemoryKb: telemetry.peakMemoryKb,
+        telemetry,
         complexity: jsComplexity,
         cases: [
           {
@@ -2181,7 +2716,8 @@ app.post('/api/judge', async (req: Request, res: Response) => {
             stdout: globalStdout,
             actualOutput: globalStdout || '(no output)',
             expectedOutput: expectedStr || '(non-empty output)',
-            error: null
+            error: null,
+            runtimeMs: telemetry.executionTimeMs
           }
         ]
       });
@@ -2211,6 +2747,7 @@ app.post('/api/judge', async (req: Request, res: Response) => {
       });
       const inputDisplay = (tc.inputs || []).map((inp: any) => `${inp.name} = ${inp.value}`).join('\n');
       activeLogs.length = 0;
+      const caseStartNs = process.hrtime.bigint();
 
       try {
         sandbox.__lcTarget = targetFn;
@@ -2221,6 +2758,8 @@ app.post('/api/judge', async (req: Request, res: Response) => {
           context,
           { timeout: deadline, breakOnSigint: true }
         );
+        const caseMs = Math.max(0.01, Math.round((Number(process.hrtime.bigint() - caseStartNs) / 1e6) * 100) / 100);
+        sampleJsMemory();
         if (actual === undefined && parsedArgs.length > 0) {
           actual = parsedArgs[0];
         }
@@ -2246,9 +2785,20 @@ app.post('/api/judge', async (req: Request, res: Response) => {
           stdout: caseStdout,
           actualOutput: actualStr,
           expectedOutput: tc.hasExpected ? tc.expectedDisplay : '(custom case)',
-          error: null
+          error: null,
+          runtimeMs: caseMs
         });
       } catch (caseErr: any) {
+        const caseMs = Math.max(0.01, Math.round((Number(process.hrtime.bigint() - caseStartNs) / 1e6) * 100) / 100);
+        sampleJsMemory();
+        const evalMs = Math.max(1, Number(process.hrtime.bigint() - evalStartNs) / 1e6);
+        const telemetry = buildTelemetrySnapshot({
+          executionTimeMs: evalMs,
+          compileTimeMs: tsJudgeCompileMs,
+          peakMemoryKb: Math.max(64, Math.round(peakDeltaBytes / 1024)),
+          timeoutLimitMs: deadline,
+          engine: jsEngineName
+        });
         const isTimeout = caseErr?.message?.includes('timed out');
         const lineMatch = String(caseErr?.stack || '').match(/solution\.js:(\d+)/);
         const errMsg = isTimeout
@@ -2263,14 +2813,32 @@ app.post('/api/judge', async (req: Request, res: Response) => {
           stdout: activeLogs.join('\n'),
           actualOutput: '',
           expectedOutput: tc.hasExpected ? tc.expectedDisplay : '(custom case)',
-          error: errMsg
+          error: errMsg,
+          runtimeMs: caseMs
         });
 
+        const verdict = isTimeout ? 'Time Limit Exceeded' : 'Runtime Error';
+        recordHistory(
+          judgeExecId,
+          normalizedLang,
+          code,
+          verdict,
+          errMsg,
+          telemetry.executionTimeMs,
+          false,
+          jsEngineName,
+          telemetry.peakMemoryKb,
+          telemetry.memoryUsedMb
+        );
         return res.json({
-          verdict: isTimeout ? 'Time Limit Exceeded' : 'Runtime Error',
+          verdict,
           passedCount: caseResults.filter((c) => c.passed).length,
           totalCount: safeCases.length,
-          runtimeMs: Date.now() - startTime,
+          runtimeMs: telemetry.executionTimeMs,
+          compileTimeMs: tsJudgeCompileMs,
+          memoryUsedMb: telemetry.memoryUsedMb,
+          peakMemoryKb: telemetry.peakMemoryKb,
+          telemetry,
           complexity: jsComplexity,
           cases: caseResults,
           errorLine: lineMatch ? parseInt(lineMatch[1], 10) : 1,
@@ -2279,13 +2847,39 @@ app.post('/api/judge', async (req: Request, res: Response) => {
       }
     }
 
+    sampleJsMemory();
+    const evalMs = Math.max(1, Number(process.hrtime.bigint() - evalStartNs) / 1e6);
+    const telemetry = buildTelemetrySnapshot({
+      executionTimeMs: evalMs,
+      compileTimeMs: tsJudgeCompileMs,
+      peakMemoryKb: Math.max(64, Math.round(peakDeltaBytes / 1024)),
+      timeoutLimitMs: deadline,
+      engine: jsEngineName
+    });
     const passedCount = caseResults.filter((c) => c.passed).length;
     const allPassed = passedCount === caseResults.length && caseResults.length > 0;
+    const verdict = allPassed ? 'Accepted' : 'Wrong Answer';
+    recordHistory(
+      judgeExecId,
+      normalizedLang,
+      code,
+      `${verdict} (${passedCount}/${caseResults.length} cases)`,
+      null,
+      telemetry.executionTimeMs,
+      allPassed,
+      jsEngineName,
+      telemetry.peakMemoryKb,
+      telemetry.memoryUsedMb
+    );
     return res.json({
-      verdict: allPassed ? 'Accepted' : 'Wrong Answer',
+      verdict,
       passedCount,
       totalCount: caseResults.length,
-      runtimeMs: Date.now() - startTime,
+      runtimeMs: telemetry.executionTimeMs,
+      compileTimeMs: tsJudgeCompileMs,
+      memoryUsedMb: telemetry.memoryUsedMb,
+      peakMemoryKb: telemetry.peakMemoryKb,
+      telemetry,
       complexity: jsComplexity,
       cases: caseResults
     });
@@ -2305,7 +2899,7 @@ app.post('/api/judge', async (req: Request, res: Response) => {
   }
 
   const pyJudgeScript = `
-import sys, json, io, ast, copy, math, collections, heapq, bisect, itertools, functools, re, types, traceback
+import sys, json, io, ast, copy, math, collections, heapq, bisect, itertools, functools, re, types, traceback, time, tracemalloc, resource
 from typing import List, Dict, Set, Tuple, Optional, Any, Callable
 from collections import defaultdict, deque, Counter
 from contextlib import redirect_stdout
@@ -2509,15 +3103,41 @@ ns = {
     "re": re, "defaultdict": defaultdict, "deque": deque, "Counter": Counter
 }
 
+def collect_py_metrics(t0_ns):
+    exec_ms = max(1, round((time.perf_counter_ns() - t0_ns) / 1_000_000, 2))
+    _, peak_b = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    rss_kb = 0
+    try:
+        with open("/proc/self/status") as sf:
+            for line in sf:
+                if line.startswith("VmHWM:"):
+                    rss_kb = int(line.split()[1])
+                    break
+                elif line.startswith("VmRSS:") and rss_kb == 0:
+                    rss_kb = int(line.split()[1])
+    except Exception:
+        pass
+    if rss_kb <= 0:
+        rss_kb = max(1, int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss))
+    return exec_ms, rss_kb, max(1, round(peak_b / 1024))
+
+tracemalloc.start()
+__pm_t0 = time.perf_counter_ns()
+
 try:
     ast_tree = ast.parse(user_code, filename="<solution>")
     py_complexity = analyze_py_complexity(ast_tree, user_code)
     compiled = compile(ast_tree, "<solution>", "exec")
 except SyntaxError as syn:
+    exec_ms, rss_kb, traced_kb = collect_py_metrics(__pm_t0)
     print(json.dumps({
         "verdict": "Compile Error",
         "passedCount": 0,
         "totalCount": len(test_cases),
+        "execMs": exec_ms,
+        "peakMemoryKb": rss_kb,
+        "tracedHeapKb": traced_kb,
         "cases": [],
         "errorLine": syn.lineno or 1,
         "errorMessage": f"{syn.msg} (col {syn.offset or 1})"
@@ -2529,10 +3149,14 @@ try:
     with redirect_stdout(top_buf):
         exec(compiled, ns)
 except Exception as exc:
+    exec_ms, rss_kb, traced_kb = collect_py_metrics(__pm_t0)
     print(json.dumps({
         "verdict": "Runtime Error",
         "passedCount": 0,
         "totalCount": len(test_cases),
+        "execMs": exec_ms,
+        "peakMemoryKb": rss_kb,
+        "tracedHeapKb": traced_kb,
         "complexity": py_complexity,
         "cases": [],
         "errorLine": extract_solution_line(exc),
@@ -2566,6 +3190,7 @@ if target_fn is None:
         target_fn = user_fns[-1]
 
 if target_fn is None:
+    exec_ms, rss_kb, traced_kb = collect_py_metrics(__pm_t0)
     global_out = top_buf.getvalue().strip()
     expected_str = str(expected_sub or (test_cases[0].get("expectedDisplay", "") if test_cases else "")).strip()
     norm_exp = expected_str.strip("\\"'").lower()
@@ -2575,6 +3200,9 @@ if target_fn is None:
         "verdict": "Accepted" if passed else "Wrong Answer",
         "passedCount": 1 if passed else 0,
         "totalCount": 1,
+        "execMs": exec_ms,
+        "peakMemoryKb": rss_kb,
+        "tracedHeapKb": traced_kb,
         "complexity": py_complexity,
         "cases": [{
             "id": "script-1",
@@ -2584,7 +3212,8 @@ if target_fn is None:
             "stdout": global_out,
             "actualOutput": global_out or "(no output)",
             "expectedOutput": expected_str or "(non-empty output)",
-            "error": None
+            "error": None,
+            "runtimeMs": exec_ms
         }]
     }))
     sys.exit(0)
@@ -2604,10 +3233,12 @@ for idx, tc in enumerate(test_cases):
             raw_args.append(val)
     input_disp = "\\n".join(f'{item["name"]} = {item["value"]}' for item in inputs)
     case_buf = io.StringIO()
+    case_t0 = time.perf_counter_ns()
     try:
         call_args = copy.deepcopy(raw_args)
         with redirect_stdout(case_buf):
             actual = target_fn(*call_args)
+        case_ms = max(0.01, round((time.perf_counter_ns() - case_t0) / 1_000_000, 2))
         has_exp = bool(tc.get("hasExpected", False))
         exp_disp = tc.get("expectedDisplay", "")
         exp_val = parse_literal(exp_disp) if has_exp else None
@@ -2626,9 +3257,12 @@ for idx, tc in enumerate(test_cases):
             "stdout": case_buf.getvalue().rstrip("\\n"),
             "actualOutput": actual_str,
             "expectedOutput": exp_disp if has_exp else "(custom case)",
-            "error": None
+            "error": None,
+            "runtimeMs": case_ms
         })
     except Exception as exc:
+        case_ms = max(0.01, round((time.perf_counter_ns() - case_t0) / 1_000_000, 2))
+        exec_ms, rss_kb, traced_kb = collect_py_metrics(__pm_t0)
         err_msg = f"{type(exc).__name__}: {exc}"
         results.append({
             "id": tc.get("id", f"case-{idx+1}"),
@@ -2638,12 +3272,16 @@ for idx, tc in enumerate(test_cases):
             "stdout": case_buf.getvalue().rstrip("\\n"),
             "actualOutput": "",
             "expectedOutput": tc.get("expectedDisplay", ""),
-            "error": err_msg
+            "error": err_msg,
+            "runtimeMs": case_ms
         })
         print(json.dumps({
             "verdict": "Runtime Error",
             "passedCount": sum(1 for r in results if r["passed"]),
             "totalCount": len(test_cases),
+            "execMs": exec_ms,
+            "peakMemoryKb": rss_kb,
+            "tracedHeapKb": traced_kb,
             "complexity": py_complexity,
             "cases": results,
             "errorLine": extract_solution_line(exc),
@@ -2651,11 +3289,15 @@ for idx, tc in enumerate(test_cases):
         }))
         sys.exit(0)
 
+exec_ms, rss_kb, traced_kb = collect_py_metrics(__pm_t0)
 passed_count = sum(1 for r in results if r["passed"])
 print(json.dumps({
     "verdict": "Accepted" if (passed_count == len(results) and len(results) > 0) else "Wrong Answer",
     "passedCount": passed_count,
     "totalCount": len(results),
+    "execMs": exec_ms,
+    "peakMemoryKb": rss_kb,
+    "tracedHeapKb": traced_kb,
     "complexity": py_complexity,
     "cases": results
 }))
@@ -2700,13 +3342,35 @@ print(json.dumps({
 
   pyProcess.on('close', () => {
     clearTimeout(timer);
-    const elapsed = Date.now() - startTime;
+    const wallElapsed = Math.max(1, Date.now() - startTime);
+    const pyJudgeEngine = 'Python 3 Isolated Judge';
     if (timedOut) {
+      const telemetry = buildTelemetrySnapshot({
+        executionTimeMs: deadline,
+        peakMemoryKb: 1024,
+        timeoutLimitMs: deadline,
+        engine: pyJudgeEngine
+      });
+      recordHistory(
+        judgeExecId,
+        'python',
+        code,
+        'Time Limit Exceeded',
+        `Time Limit Exceeded (${deadline}ms)`,
+        telemetry.executionTimeMs,
+        false,
+        pyJudgeEngine,
+        telemetry.peakMemoryKb,
+        telemetry.memoryUsedMb
+      );
       return res.json({
         verdict: 'Time Limit Exceeded',
         passedCount: 0,
         totalCount: safeCases.length,
-        runtimeMs: elapsed,
+        runtimeMs: telemetry.executionTimeMs,
+        memoryUsedMb: telemetry.memoryUsedMb,
+        peakMemoryKb: telemetry.peakMemoryKb,
+        telemetry,
         cases: [],
         errorLine: 1,
         errorMessage: `Time Limit Exceeded (${deadline}ms)`
@@ -2714,19 +3378,62 @@ print(json.dumps({
     }
     try {
       const parsed = JSON.parse(stdoutData.trim());
+      const telemetry = buildTelemetrySnapshot({
+        executionTimeMs: Number(parsed.execMs) || wallElapsed,
+        peakMemoryKb: Number(parsed.peakMemoryKb) || Number(parsed.tracedHeapKb) || 1024,
+        timeoutLimitMs: deadline,
+        engine: pyJudgeEngine
+      });
+      recordHistory(
+        judgeExecId,
+        'python',
+        code,
+        `${parsed.verdict || 'Executed'} (${parsed.passedCount || 0}/${parsed.totalCount || 0} cases)`,
+        parsed.errorMessage || null,
+        telemetry.executionTimeMs,
+        parsed.verdict === 'Accepted',
+        pyJudgeEngine,
+        telemetry.peakMemoryKb,
+        telemetry.memoryUsedMb
+      );
       return res.json({
         ...parsed,
-        runtimeMs: elapsed
+        runtimeMs: telemetry.executionTimeMs,
+        memoryUsedMb: telemetry.memoryUsedMb,
+        peakMemoryKb: telemetry.peakMemoryKb,
+        telemetry
       });
     } catch {
+      const telemetry = buildTelemetrySnapshot({
+        executionTimeMs: wallElapsed,
+        peakMemoryKb: 512,
+        timeoutLimitMs: deadline,
+        engine: pyJudgeEngine
+      });
+      const errMsg = stderrData.trim() || 'Judge runner failed to produce a verdict.';
+      recordHistory(
+        judgeExecId,
+        'python',
+        code,
+        'Runtime Error',
+        errMsg,
+        telemetry.executionTimeMs,
+        false,
+        pyJudgeEngine,
+        telemetry.peakMemoryKb,
+        telemetry.memoryUsedMb
+      );
       return res.json({
         verdict: 'Runtime Error',
         passedCount: 0,
         totalCount: safeCases.length,
-        runtimeMs: elapsed,
+        runtimeMs: telemetry.executionTimeMs,
+        memoryUsedMb: telemetry.memoryUsedMb,
+        peakMemoryKb: telemetry.peakMemoryKb,
+        telemetry,
         cases: [],
         errorLine: 1,
-        errorMessage: stderrData.trim() || 'Judge runner failed to produce a verdict.'
+        errorMessage: errMsg
       });
     }
   });
@@ -3012,6 +3719,15 @@ app.get('/api/metrics', (_req: Request, res: Response) => {
     totalExecutions > 0
       ? Math.round((store.history.reduce((sum, h) => sum + h.executionTimeMs, 0) / totalExecutions) * 100) / 100
       : 0;
+  const memRecords = store.history.filter(h => typeof h.peakMemoryKb === 'number' && h.peakMemoryKb > 0);
+  const avgPeakMemoryKb =
+    memRecords.length > 0
+      ? Math.round(memRecords.reduce((sum, h) => sum + (h.peakMemoryKb || 0), 0) / memRecords.length)
+      : 0;
+  const avgMemoryMb =
+    memRecords.length > 0
+      ? Math.round((avgPeakMemoryKb / 1024) * 100) / 100
+      : 0;
 
   const languageCounts = {
     python: store.history.filter(h => h.language === 'python').length,
@@ -3028,6 +3744,8 @@ app.get('/api/metrics', (_req: Request, res: Response) => {
     successCount,
     failureCount,
     avgExecutionTimeMs,
+    avgMemoryMb,
+    avgPeakMemoryKb,
     languageCounts,
     recentHistory: store.history.slice(0, 10)
   });

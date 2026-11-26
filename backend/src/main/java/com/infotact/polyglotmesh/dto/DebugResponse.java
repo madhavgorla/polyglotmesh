@@ -19,6 +19,9 @@ public class DebugResponse {
     private DebugRuntimeError runtimeError;
     private String finalOutput;
     private long executionTimeMs;
+    private Double memoryUsedMb;
+    private Long peakMemoryKb;
+    private String engine;
     private Boolean truncated;
 
     public DebugResponse() {
@@ -106,6 +109,30 @@ public class DebugResponse {
 
     public void setExecutionTimeMs(long executionTimeMs) {
         this.executionTimeMs = executionTimeMs;
+    }
+
+    public Double getMemoryUsedMb() {
+        return memoryUsedMb;
+    }
+
+    public void setMemoryUsedMb(Double memoryUsedMb) {
+        this.memoryUsedMb = memoryUsedMb;
+    }
+
+    public Long getPeakMemoryKb() {
+        return peakMemoryKb;
+    }
+
+    public void setPeakMemoryKb(Long peakMemoryKb) {
+        this.peakMemoryKb = peakMemoryKb;
+    }
+
+    public String getEngine() {
+        return engine;
+    }
+
+    public void setEngine(String engine) {
+        this.engine = engine;
     }
 
     public Boolean getTruncated() {

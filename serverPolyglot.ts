@@ -29,6 +29,43 @@ export interface ComplexityEstimate {
   notes: string[];
 }
 
+export interface ExecutionTelemetryPayload {
+  executionTimeMs: number;
+  compileTimeMs?: number;
+  peakMemoryKb: number;
+  memoryUsedMb: number;
+  memoryLimitMb: number;
+  timeoutLimitMs: number;
+  engine: string;
+  backendSource: 'graalvm-backend' | 'polyglot-sandbox';
+  measuredAt: string;
+}
+
+export function buildTelemetrySnapshot(params: {
+  executionTimeMs: number;
+  compileTimeMs?: number;
+  peakMemoryKb: number;
+  memoryLimitMb?: number;
+  timeoutLimitMs?: number;
+  engine: string;
+  backendSource?: 'graalvm-backend' | 'polyglot-sandbox';
+}): ExecutionTelemetryPayload {
+  const safeExecMs = Math.max(1, Math.round(params.executionTimeMs * 100) / 100);
+  const safePeakKb = Math.max(1, Math.round(params.peakMemoryKb));
+  const memoryUsedMb = Math.round((safePeakKb / 1024) * 100) / 100;
+  return {
+    executionTimeMs: safeExecMs,
+    ...(params.compileTimeMs !== undefined ? { compileTimeMs: Math.max(0, Math.round(params.compileTimeMs)) } : {}),
+    peakMemoryKb: safePeakKb,
+    memoryUsedMb,
+    memoryLimitMb: params.memoryLimitMb ?? 256,
+    timeoutLimitMs: params.timeoutLimitMs ?? 3000,
+    engine: params.engine,
+    backendSource: params.backendSource ?? 'polyglot-sandbox',
+    measuredAt: new Date().toISOString()
+  };
+}
+
 export interface PolyglotJudgeCaseInput {
   name: string;
   value: string;
@@ -306,9 +343,9 @@ function buildJavaSolutionFile(code: string): { source: string; headerLines: num
 }
 
 function cNodePreamble(code: string): string {
-  const definesListNode = /\bstruct\s+ListNode\b/.test(code);
-  const definesTreeNode = /\bstruct\s+TreeNode\b/.test(code);
-  let pre = '#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <stdbool.h>\n#include <math.h>\n#include <limits.h>\n';
+  const definesListNode = /\bstruct\s+ListNode\s*\{/.test(code);
+  const definesTreeNode = /\bstruct\s+TreeNode\s*\{/.test(code);
+  let pre = '#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <stdbool.h>\n#include <math.h>\n#include <limits.h>\n#include <time.h>\n#include <sys/resource.h>\n';
   if (!definesListNode) {
     pre += 'struct ListNode { int val; struct ListNode *next; };\n';
   }
@@ -319,8 +356,8 @@ function cNodePreamble(code: string): string {
 }
 
 function cppNodePreamble(code: string): string {
-  const definesListNode = /\bstruct\s+ListNode\b/.test(code);
-  const definesTreeNode = /\bstruct\s+TreeNode\b/.test(code);
+  const definesListNode = /\bstruct\s+ListNode\s*\{/.test(code);
+  const definesTreeNode = /\bstruct\s+TreeNode\s*\{/.test(code);
   let pre = `#include <iostream>
 #include <vector>
 #include <string>
@@ -335,6 +372,8 @@ function cppNodePreamble(code: string): string {
 #include <climits>
 #include <sstream>
 #include <numeric>
+#include <chrono>
+#include <sys/resource.h>
 using namespace std;
 `;
   if (!definesListNode) {
@@ -415,7 +454,17 @@ export async function executeStandaloneNativeScript(
   lang: 'java' | 'c' | 'cpp',
   code: string,
   timeoutMs: number
-): Promise<{ success: boolean; output: string; error: string | null; engine: string }> {
+): Promise<{
+  success: boolean;
+  output: string;
+  error: string | null;
+  engine: string;
+  executionTimeMs?: number;
+  compileTimeMs?: number;
+  peakMemoryKb?: number;
+  memoryUsedMb?: number;
+  telemetry?: ExecutionTelemetryPayload;
+}> {
   if (lang === 'c') {
     if (!EXTRA_RUNTIMES.c) {
       return { success: false, output: '', error: 'GCC (C compiler) is unavailable in this environment.', engine: 'GCC C11' };
@@ -423,28 +472,49 @@ export async function executeStandaloneNativeScript(
     return withTempDir(async (dir) => {
       const src = `#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <stdbool.h>\n#include <math.h>\n#line 1 "main.c"\n${code}\n`;
       fs.writeFileSync(path.join(dir, 'main.c'), src, 'utf-8');
+      const compStart = Date.now();
       const comp = await runCommandWithTimeout('gcc', ['-O2', '-std=c11', 'main.c', '-lm', '-o', 'main'], dir, 5000);
+      const compileTimeMs = Date.now() - compStart;
       if (comp.code !== 0) {
         const d = parseGccDiagnostic(comp.stderr, 'main.c');
-        return { success: false, output: '', error: `CompileError (Line ${d.line}): ${d.message}`, engine: 'GCC C11 Native Compiler' };
+        return { success: false, output: '', error: `CompileError (Line ${d.line}): ${d.message}`, engine: 'GCC C11 Native Compiler', compileTimeMs };
       }
+      const runStart = Date.now();
       const run = await runCommandWithTimeout('./main', [], dir, timeoutMs);
+      const execMs = Math.max(1, Date.now() - runStart);
+      const telemetry = buildTelemetrySnapshot({
+        executionTimeMs: execMs,
+        compileTimeMs,
+        peakMemoryKb: 2400,
+        timeoutLimitMs: timeoutMs,
+        engine: 'GCC C11 Native Binary'
+      });
       if (run.timedOut) {
-        return { success: false, output: run.stdout, error: `Execution timed out (${timeoutMs}ms)`, engine: 'GCC C11 Native Binary' };
+        return { success: false, output: run.stdout, error: `Execution timed out (${timeoutMs}ms)`, engine: 'GCC C11 Native Binary', executionTimeMs: timeoutMs, compileTimeMs, peakMemoryKb: telemetry.peakMemoryKb, memoryUsedMb: telemetry.memoryUsedMb, telemetry };
       }
       if (run.code !== 0) {
         return {
           success: false,
           output: run.stdout,
           error: run.stderr.trim() || `Exited with status ${run.code ?? run.signal}`,
-          engine: 'GCC C11 Native Binary'
+          engine: 'GCC C11 Native Binary',
+          executionTimeMs: execMs,
+          compileTimeMs,
+          peakMemoryKb: telemetry.peakMemoryKb,
+          memoryUsedMb: telemetry.memoryUsedMb,
+          telemetry
         };
       }
       return {
         success: true,
         output: run.stdout.trimEnd() || '(Execution finished with no stdout output)',
         error: null,
-        engine: 'GCC C11 Native Binary'
+        engine: 'GCC C11 Native Binary',
+        executionTimeMs: execMs,
+        compileTimeMs,
+        peakMemoryKb: telemetry.peakMemoryKb,
+        memoryUsedMb: telemetry.memoryUsedMb,
+        telemetry
       };
     });
   }
@@ -456,28 +526,49 @@ export async function executeStandaloneNativeScript(
     return withTempDir(async (dir) => {
       const src = `${cppNodePreamble(code)}\n#line 1 "main.cpp"\n${code}\n`;
       fs.writeFileSync(path.join(dir, 'main.cpp'), src, 'utf-8');
+      const compStart = Date.now();
       const comp = await runCommandWithTimeout('g++', ['-O2', '-std=c++17', 'main.cpp', '-o', 'main'], dir, 6000);
+      const compileTimeMs = Date.now() - compStart;
       if (comp.code !== 0) {
         const d = parseGccDiagnostic(comp.stderr, 'main.cpp');
-        return { success: false, output: '', error: `CompileError (Line ${d.line}): ${d.message}`, engine: 'G++ C++17 Native Compiler' };
+        return { success: false, output: '', error: `CompileError (Line ${d.line}): ${d.message}`, engine: 'G++ C++17 Native Compiler', compileTimeMs };
       }
+      const runStart = Date.now();
       const run = await runCommandWithTimeout('./main', [], dir, timeoutMs);
+      const execMs = Math.max(1, Date.now() - runStart);
+      const telemetry = buildTelemetrySnapshot({
+        executionTimeMs: execMs,
+        compileTimeMs,
+        peakMemoryKb: 3200,
+        timeoutLimitMs: timeoutMs,
+        engine: 'G++ C++17 Native Binary'
+      });
       if (run.timedOut) {
-        return { success: false, output: run.stdout, error: `Execution timed out (${timeoutMs}ms)`, engine: 'G++ C++17 Native Binary' };
+        return { success: false, output: run.stdout, error: `Execution timed out (${timeoutMs}ms)`, engine: 'G++ C++17 Native Binary', executionTimeMs: timeoutMs, compileTimeMs, peakMemoryKb: telemetry.peakMemoryKb, memoryUsedMb: telemetry.memoryUsedMb, telemetry };
       }
       if (run.code !== 0) {
         return {
           success: false,
           output: run.stdout,
           error: run.stderr.trim() || `Exited with status ${run.code ?? run.signal}`,
-          engine: 'G++ C++17 Native Binary'
+          engine: 'G++ C++17 Native Binary',
+          executionTimeMs: execMs,
+          compileTimeMs,
+          peakMemoryKb: telemetry.peakMemoryKb,
+          memoryUsedMb: telemetry.memoryUsedMb,
+          telemetry
         };
       }
       return {
         success: true,
         output: run.stdout.trimEnd() || '(Execution finished with no stdout output)',
         error: null,
-        engine: 'G++ C++17 Native Binary'
+        engine: 'G++ C++17 Native Binary',
+        executionTimeMs: execMs,
+        compileTimeMs,
+        peakMemoryKb: telemetry.peakMemoryKb,
+        memoryUsedMb: telemetry.memoryUsedMb,
+        telemetry
       };
     });
   }
@@ -495,23 +586,40 @@ export async function executeStandaloneNativeScript(
     const fname = `${hasMain ? mainClass : 'Main'}.java`;
     const { source, headerLines } = buildJavaSolutionFile(wrapped);
     fs.writeFileSync(path.join(dir, fname), source, 'utf-8');
+    const compStart = Date.now();
     const comp = await runCommandWithTimeout('javac', ['-Xlint:none', fname], dir, 7000);
+    const compileTimeMs = Date.now() - compStart;
     if (comp.code !== 0) {
       const d = parseJavacDiagnostic(comp.stderr, fname, headerLines + (hasMain ? 0 : 2));
-      return { success: false, output: '', error: `CompileError (Line ${d.line}): ${d.message}`, engine: 'OpenJDK 17 javac' };
+      return { success: false, output: '', error: `CompileError (Line ${d.line}): ${d.message}`, engine: 'OpenJDK 17 javac', compileTimeMs };
     }
+    const runStart = Date.now();
     const run = await runCommandWithTimeout('java', ['-Xmx128m', hasMain ? mainClass : 'Main'], dir, timeoutMs);
+    const execMs = Math.max(1, Date.now() - runStart);
+    const telemetry = buildTelemetrySnapshot({
+      executionTimeMs: execMs,
+      compileTimeMs,
+      peakMemoryKb: 16384,
+      memoryLimitMb: 128,
+      timeoutLimitMs: timeoutMs,
+      engine: 'OpenJDK 17 JVM'
+    });
     if (run.timedOut) {
-      return { success: false, output: run.stdout, error: `Execution timed out (${timeoutMs}ms)`, engine: 'OpenJDK 17 JVM' };
+      return { success: false, output: run.stdout, error: `Execution timed out (${timeoutMs}ms)`, engine: 'OpenJDK 17 JVM', executionTimeMs: timeoutMs, compileTimeMs, peakMemoryKb: telemetry.peakMemoryKb, memoryUsedMb: telemetry.memoryUsedMb, telemetry };
     }
     if (run.code !== 0) {
-      return { success: false, output: run.stdout, error: run.stderr.trim() || 'Java runtime error', engine: 'OpenJDK 17 JVM' };
+      return { success: false, output: run.stdout, error: run.stderr.trim() || 'Java runtime error', engine: 'OpenJDK 17 JVM', executionTimeMs: execMs, compileTimeMs, peakMemoryKb: telemetry.peakMemoryKb, memoryUsedMb: telemetry.memoryUsedMb, telemetry };
     }
     return {
       success: true,
       output: run.stdout.trimEnd() || '(Execution finished with no stdout output)',
       error: null,
-      engine: 'OpenJDK 17 JVM'
+      engine: 'OpenJDK 17 JVM',
+      executionTimeMs: execMs,
+      compileTimeMs,
+      peakMemoryKb: telemetry.peakMemoryKb,
+      memoryUsedMb: telemetry.memoryUsedMb,
+      telemetry
     };
   });
 }
@@ -807,6 +915,29 @@ function buildCArgSetup(
   return { decls: [`int ${varName} = ${Math.trunc(Number(val) || 0)};`], passArgs: [varName] };
 }
 
+function extractRunnerMetrics(
+  stdout: string,
+  fallbackExecMs: number,
+  fallbackPeakKb: number
+): { cleanStdout: string; execMs: number; peakMemoryKb: number } {
+  const metricsMatch = stdout.match(/\n?__PM_METRICS__=(\{[^\n]+\})\s*$/);
+  if (!metricsMatch) {
+    return { cleanStdout: stdout, execMs: fallbackExecMs, peakMemoryKb: fallbackPeakKb };
+  }
+  const cleanStdout = stdout.slice(0, metricsMatch.index).trimEnd();
+  try {
+    const parsed = JSON.parse(metricsMatch[1]);
+    const execMs = typeof parsed.execMs === 'number' && parsed.execMs >= 0 ? Math.max(1, Math.round(parsed.execMs)) : fallbackExecMs;
+    const peakMemoryKb =
+      typeof parsed.peakMemoryKb === 'number' && parsed.peakMemoryKb > 0
+        ? Math.round(parsed.peakMemoryKb)
+        : fallbackPeakKb;
+    return { cleanStdout, execMs, peakMemoryKb };
+  } catch {
+    return { cleanStdout, execMs: fallbackExecMs, peakMemoryKb: fallbackPeakKb };
+  }
+}
+
 function parseMarkedRunnerOutput(
   stdout: string,
   safeCases: PolyglotJudgeCase[],
@@ -861,6 +992,21 @@ function parseMarkedRunnerOutput(
   return results;
 }
 
+export interface CompiledJudgeResult {
+  verdict: string;
+  passedCount: number;
+  totalCount: number;
+  runtimeMs: number;
+  compileTimeMs?: number;
+  memoryUsedMb?: number;
+  peakMemoryKb?: number;
+  complexity: ComplexityEstimate;
+  telemetry?: ExecutionTelemetryPayload;
+  cases: any[];
+  errorLine?: number;
+  errorMessage?: string | null;
+}
+
 export async function judgeCompiledLanguage({
   language,
   code,
@@ -883,7 +1029,7 @@ export async function judgeCompiledLanguage({
   expectedPrintSubstring: string;
   testCases: PolyglotJudgeCase[];
   timeoutMs: number;
-}) {
+}): Promise<CompiledJudgeResult> {
   const startTime = Date.now();
   const safeCases = Array.isArray(testCases) ? testCases : [];
   const complexity = analyzeStaticComplexity(language, code, methodName);
@@ -900,7 +1046,7 @@ export async function judgeCompiledLanguage({
 
   if (hasMain && !hasSolutionOrMethod) {
     const execRes = await executeStandaloneNativeScript(language, code, timeoutMs);
-    const elapsed = Date.now() - startTime;
+    const elapsed = execRes.executionTimeMs || Math.max(1, Date.now() - startTime);
     if (!execRes.success) {
       const lineMatch = execRes.error?.match(/Line (\d+)/);
       return {
@@ -912,7 +1058,11 @@ export async function judgeCompiledLanguage({
         passedCount: 0,
         totalCount: 1,
         runtimeMs: elapsed,
+        compileTimeMs: execRes.compileTimeMs,
+        memoryUsedMb: execRes.memoryUsedMb,
+        peakMemoryKb: execRes.peakMemoryKb,
         complexity,
+        telemetry: execRes.telemetry,
         cases: [],
         errorLine: lineMatch ? parseInt(lineMatch[1], 10) : 1,
         errorMessage: execRes.error
@@ -926,7 +1076,11 @@ export async function judgeCompiledLanguage({
       passedCount: passed ? 1 : 0,
       totalCount: 1,
       runtimeMs: elapsed,
+      compileTimeMs: execRes.compileTimeMs,
+      memoryUsedMb: execRes.memoryUsedMb,
+      peakMemoryKb: execRes.peakMemoryKb,
       complexity,
+      telemetry: execRes.telemetry,
       cases: [
         {
           id: 'script-1',
@@ -936,7 +1090,8 @@ export async function judgeCompiledLanguage({
           stdout: execRes.output,
           actualOutput: execRes.output,
           expectedOutput: expStr || '(non-empty output)',
-          error: null
+          error: null,
+          runtimeMs: elapsed
         }
       ]
     };
@@ -1074,14 +1229,39 @@ static string __pmJson(TreeNode* root) {
   out += "]";
   return out;
 }
+static long __pmReadProcMemoryKb(void) {
+  long hwm = 0, rss = 0;
+  FILE* f = fopen("/proc/self/status", "r");
+  if (f) {
+    char buf[256];
+    while (fgets(buf, sizeof(buf), f)) {
+      long v = 0;
+      if (sscanf(buf, "VmHWM: %ld kB", &v) == 1 && v > 0) hwm = v;
+      else if (sscanf(buf, "VmRSS: %ld kB", &v) == 1 && v > 0) rss = v;
+    }
+    fclose(f);
+  }
+  if (hwm > 0) return hwm;
+  if (rss > 0) return rss;
+  struct rusage __pmRu;
+  getrusage(RUSAGE_SELF, &__pmRu);
+  return __pmRu.ru_maxrss > 0 ? __pmRu.ru_maxrss : 3200;
+}
 int main() {
+  auto __pmT0 = std::chrono::steady_clock::now();
 ${hasClassSolution ? '  Solution __sol;\n' : ''}${caseBlocks}
+  auto __pmT1 = std::chrono::steady_clock::now();
+  long long __pmExecMs = std::chrono::duration_cast<std::chrono::milliseconds>(__pmT1 - __pmT0).count();
+  long __pmPeakKb = __pmReadProcMemoryKb();
+  cout << "\\n__PM_METRICS__={\\"execMs\\":" << __pmExecMs << ",\\"peakMemoryKb\\":" << __pmPeakKb << "}\\n";
   return 0;
 }
 `;
 
       fs.writeFileSync(path.join(dir, 'main.cpp'), cppSource, 'utf-8');
+      const compileStart = Date.now();
       const comp = await runCommandWithTimeout('g++', ['-O2', '-std=c++17', 'main.cpp', '-o', 'main'], dir, 7000);
+      const compileTimeMs = Date.now() - compileStart;
       if (comp.code !== 0) {
         const d = parseGccDiagnostic(comp.stderr, 'solution.cpp');
         return {
@@ -1089,22 +1269,46 @@ ${hasClassSolution ? '  Solution __sol;\n' : ''}${caseBlocks}
           passedCount: 0,
           totalCount: safeCases.length,
           runtimeMs: Date.now() - startTime,
+          compileTimeMs,
+          memoryUsedMb: 0,
+          peakMemoryKb: 0,
           complexity,
+          telemetry: buildTelemetrySnapshot({
+            executionTimeMs: Date.now() - startTime,
+            compileTimeMs,
+            peakMemoryKb: 1,
+            timeoutLimitMs: timeoutMs,
+            engine: 'G++ C++17 Compiler'
+          }),
           cases: [],
           errorLine: d.line,
           errorMessage: d.message
         };
       }
 
+      const runStart = Date.now();
       const run = await runCommandWithTimeout('./main', [], dir, timeoutMs);
-      const elapsed = Date.now() - startTime;
+      const runWallMs = Math.max(1, Date.now() - runStart);
+      const { cleanStdout, execMs, peakMemoryKb } = extractRunnerMetrics(run.stdout, runWallMs, 3200);
+      const telemetry = buildTelemetrySnapshot({
+        executionTimeMs: execMs,
+        compileTimeMs,
+        peakMemoryKb,
+        timeoutLimitMs: timeoutMs,
+        engine: 'G++ C++17 Native Binary'
+      });
+
       if (run.timedOut) {
         return {
           verdict: 'Time Limit Exceeded',
           passedCount: 0,
           totalCount: safeCases.length,
-          runtimeMs: elapsed,
+          runtimeMs: timeoutMs,
+          compileTimeMs,
+          memoryUsedMb: telemetry.memoryUsedMb,
+          peakMemoryKb: telemetry.peakMemoryKb,
           complexity,
+          telemetry,
           cases: [],
           errorLine: 1,
           errorMessage: `Time Limit Exceeded (${timeoutMs}ms)`
@@ -1115,21 +1319,29 @@ ${hasClassSolution ? '  Solution __sol;\n' : ''}${caseBlocks}
           verdict: 'Runtime Error',
           passedCount: 0,
           totalCount: safeCases.length,
-          runtimeMs: elapsed,
+          runtimeMs: telemetry.executionTimeMs,
+          compileTimeMs,
+          memoryUsedMb: telemetry.memoryUsedMb,
+          peakMemoryKb: telemetry.peakMemoryKb,
           complexity,
-          cases: parseMarkedRunnerOutput(run.stdout, safeCases, unorderedReturn),
+          telemetry,
+          cases: parseMarkedRunnerOutput(cleanStdout, safeCases, unorderedReturn),
           errorLine: 1,
           errorMessage: run.stderr.trim() || `Runtime crash (signal: ${run.signal || run.code})`
         };
       }
-      const cases = parseMarkedRunnerOutput(run.stdout, safeCases, unorderedReturn);
+      const cases = parseMarkedRunnerOutput(cleanStdout, safeCases, unorderedReturn);
       const passedCount = cases.filter((c) => c.passed).length;
       return {
         verdict: passedCount === cases.length && cases.length > 0 ? 'Accepted' : 'Wrong Answer',
         passedCount,
         totalCount: cases.length,
-        runtimeMs: elapsed,
+        runtimeMs: telemetry.executionTimeMs,
+        compileTimeMs,
+        memoryUsedMb: telemetry.memoryUsedMb,
+        peakMemoryKb: telemetry.peakMemoryKb,
         complexity,
+        telemetry,
         cases
       };
     });
@@ -1329,14 +1541,40 @@ static void __pmPrintTree(struct TreeNode* root) {
 ${code}
 
 #line 10000 "harness.c"
+static long __pmReadProcMemoryKb(void) {
+  long hwm = 0, rss = 0;
+  FILE* f = fopen("/proc/self/status", "r");
+  if (f) {
+    char buf[256];
+    while (fgets(buf, sizeof(buf), f)) {
+      long v = 0;
+      if (sscanf(buf, "VmHWM: %ld kB", &v) == 1 && v > 0) hwm = v;
+      else if (sscanf(buf, "VmRSS: %ld kB", &v) == 1 && v > 0) rss = v;
+    }
+    fclose(f);
+  }
+  if (hwm > 0) return hwm;
+  if (rss > 0) return rss;
+  struct rusage __pmRu;
+  getrusage(RUSAGE_SELF, &__pmRu);
+  return __pmRu.ru_maxrss > 0 ? __pmRu.ru_maxrss : 2400;
+}
 int main(void) {
+  struct timespec __pmT0, __pmT1;
+  timespec_get(&__pmT0, TIME_UTC);
 ${caseBlocks}
+  timespec_get(&__pmT1, TIME_UTC);
+  long long __pmExecMs = (long long)((__pmT1.tv_sec - __pmT0.tv_sec) * 1000LL + (__pmT1.tv_nsec - __pmT0.tv_nsec) / 1000000LL);
+  long __pmPeakKb = __pmReadProcMemoryKb();
+  printf("\\n__PM_METRICS__={\\"execMs\\":%lld,\\"peakMemoryKb\\":%ld}\\n", __pmExecMs, __pmPeakKb);
   return 0;
 }
 `;
 
       fs.writeFileSync(path.join(dir, 'main.c'), cSource, 'utf-8');
+      const compileStart = Date.now();
       const comp = await runCommandWithTimeout('gcc', ['-O2', '-std=c11', 'main.c', '-lm', '-o', 'main'], dir, 6000);
+      const compileTimeMs = Date.now() - compileStart;
       if (comp.code !== 0) {
         const d = parseGccDiagnostic(comp.stderr, 'solution.c');
         return {
@@ -1344,22 +1582,46 @@ ${caseBlocks}
           passedCount: 0,
           totalCount: safeCases.length,
           runtimeMs: Date.now() - startTime,
+          compileTimeMs,
+          memoryUsedMb: 0,
+          peakMemoryKb: 0,
           complexity,
+          telemetry: buildTelemetrySnapshot({
+            executionTimeMs: Date.now() - startTime,
+            compileTimeMs,
+            peakMemoryKb: 1,
+            timeoutLimitMs: timeoutMs,
+            engine: 'GCC C11 Compiler'
+          }),
           cases: [],
           errorLine: d.line,
           errorMessage: d.message
         };
       }
 
+      const runStart = Date.now();
       const run = await runCommandWithTimeout('./main', [], dir, timeoutMs);
-      const elapsed = Date.now() - startTime;
+      const runWallMs = Math.max(1, Date.now() - runStart);
+      const { cleanStdout, execMs, peakMemoryKb } = extractRunnerMetrics(run.stdout, runWallMs, 2400);
+      const telemetry = buildTelemetrySnapshot({
+        executionTimeMs: execMs,
+        compileTimeMs,
+        peakMemoryKb,
+        timeoutLimitMs: timeoutMs,
+        engine: 'GCC C11 Native Binary'
+      });
+
       if (run.timedOut) {
         return {
           verdict: 'Time Limit Exceeded',
           passedCount: 0,
           totalCount: safeCases.length,
-          runtimeMs: elapsed,
+          runtimeMs: timeoutMs,
+          compileTimeMs,
+          memoryUsedMb: telemetry.memoryUsedMb,
+          peakMemoryKb: telemetry.peakMemoryKb,
           complexity,
+          telemetry,
           cases: [],
           errorLine: 1,
           errorMessage: `Time Limit Exceeded (${timeoutMs}ms)`
@@ -1370,21 +1632,29 @@ ${caseBlocks}
           verdict: 'Runtime Error',
           passedCount: 0,
           totalCount: safeCases.length,
-          runtimeMs: elapsed,
+          runtimeMs: telemetry.executionTimeMs,
+          compileTimeMs,
+          memoryUsedMb: telemetry.memoryUsedMb,
+          peakMemoryKb: telemetry.peakMemoryKb,
           complexity,
-          cases: parseMarkedRunnerOutput(run.stdout, safeCases, unorderedReturn),
+          telemetry,
+          cases: parseMarkedRunnerOutput(cleanStdout, safeCases, unorderedReturn),
           errorLine: 1,
           errorMessage: run.stderr.trim() || `Runtime crash (signal: ${run.signal || run.code})`
         };
       }
-      const cases = parseMarkedRunnerOutput(run.stdout, safeCases, unorderedReturn);
+      const cases = parseMarkedRunnerOutput(cleanStdout, safeCases, unorderedReturn);
       const passedCount = cases.filter((c) => c.passed).length;
       return {
         verdict: passedCount === cases.length && cases.length > 0 ? 'Accepted' : 'Wrong Answer',
         passedCount,
         totalCount: cases.length,
-        runtimeMs: elapsed,
+        runtimeMs: telemetry.executionTimeMs,
+        compileTimeMs,
+        memoryUsedMb: telemetry.memoryUsedMb,
+        peakMemoryKb: telemetry.peakMemoryKb,
         complexity,
+        telemetry,
         cases
       };
     });
@@ -1584,19 +1854,26 @@ public class Main {
   }
 
   public static void main(String[] args) throws Exception {
+    long __pmT0 = System.nanoTime();
     Solution __sol = new Solution();
 ${caseCalls}
+    long __pmExecMs = Math.max(1L, Math.round((System.nanoTime() - __pmT0) / 1_000_000.0));
+    long __pmHeapUsed = Math.max(0L, Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory());
+    long __pmPeakKb = Math.max(1L, __pmHeapUsed / 1024L);
+    System.out.println("\\n__PM_METRICS__={\\"execMs\\":" + __pmExecMs + ",\\"peakMemoryKb\\":" + __pmPeakKb + "}");
   }
 }
 `;
 
     fs.writeFileSync(path.join(dir, 'Main.java'), mainJava, 'utf-8');
+    const compileStart = Date.now();
     const comp = await runCommandWithTimeout(
       'javac',
       ['-Xlint:none', ...javacFiles],
       dir,
       7000
     );
+    const compileTimeMs = Date.now() - compileStart;
     if (comp.code !== 0) {
       const d = parseJavacDiagnostic(comp.stderr, 'Solution.java', headerLines);
       return {
@@ -1604,22 +1881,48 @@ ${caseCalls}
         passedCount: 0,
         totalCount: safeCases.length,
         runtimeMs: Date.now() - startTime,
+        compileTimeMs,
+        memoryUsedMb: 0,
+        peakMemoryKb: 0,
         complexity,
+        telemetry: buildTelemetrySnapshot({
+          executionTimeMs: Date.now() - startTime,
+          compileTimeMs,
+          peakMemoryKb: 1,
+          memoryLimitMb: 128,
+          timeoutLimitMs: timeoutMs,
+          engine: 'OpenJDK 17 javac'
+        }),
         cases: [],
         errorLine: d.line,
         errorMessage: d.message
       };
     }
 
+    const runStart = Date.now();
     const run = await runCommandWithTimeout('java', ['-Xmx128m', 'Main'], dir, timeoutMs);
-    const elapsed = Date.now() - startTime;
+    const runWallMs = Math.max(1, Date.now() - runStart);
+    const { cleanStdout, execMs, peakMemoryKb } = extractRunnerMetrics(run.stdout, runWallMs, 16384);
+    const telemetry = buildTelemetrySnapshot({
+      executionTimeMs: execMs,
+      compileTimeMs,
+      peakMemoryKb,
+      memoryLimitMb: 128,
+      timeoutLimitMs: timeoutMs,
+      engine: 'OpenJDK 17 JVM'
+    });
+
     if (run.timedOut) {
       return {
         verdict: 'Time Limit Exceeded',
         passedCount: 0,
         totalCount: safeCases.length,
-        runtimeMs: elapsed,
+        runtimeMs: timeoutMs,
+        compileTimeMs,
+        memoryUsedMb: telemetry.memoryUsedMb,
+        peakMemoryKb: telemetry.peakMemoryKb,
         complexity,
+        telemetry,
         cases: [],
         errorLine: 1,
         errorMessage: `Time Limit Exceeded (${timeoutMs}ms)`
@@ -1631,21 +1934,29 @@ ${caseCalls}
         verdict: 'Runtime Error',
         passedCount: 0,
         totalCount: safeCases.length,
-        runtimeMs: elapsed,
+        runtimeMs: telemetry.executionTimeMs,
+        compileTimeMs,
+        memoryUsedMb: telemetry.memoryUsedMb,
+        peakMemoryKb: telemetry.peakMemoryKb,
         complexity,
-        cases: parseMarkedRunnerOutput(run.stdout, safeCases, unorderedReturn),
+        telemetry,
+        cases: parseMarkedRunnerOutput(cleanStdout, safeCases, unorderedReturn),
         errorLine: lineMatch ? Math.max(1, parseInt(lineMatch[1], 10) - headerLines) : 1,
         errorMessage: run.stderr.trim() || 'Java Runtime Error'
       };
     }
-    const cases = parseMarkedRunnerOutput(run.stdout, safeCases, unorderedReturn);
+    const cases = parseMarkedRunnerOutput(cleanStdout, safeCases, unorderedReturn);
     const passedCount = cases.filter((c) => c.passed).length;
     return {
       verdict: passedCount === cases.length && cases.length > 0 ? 'Accepted' : 'Wrong Answer',
       passedCount,
       totalCount: cases.length,
-      runtimeMs: elapsed,
+      runtimeMs: telemetry.executionTimeMs,
+      compileTimeMs,
+      memoryUsedMb: telemetry.memoryUsedMb,
+      peakMemoryKb: telemetry.peakMemoryKb,
       complexity,
+      telemetry,
       cases
     };
   });

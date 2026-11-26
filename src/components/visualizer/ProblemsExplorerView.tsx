@@ -17,6 +17,61 @@ interface ProblemsExplorerViewProps {
   onOpenCommandPalette?: () => void;
 }
 
+const DIFFICULTY_META: Record<
+  AlgorithmProblem['difficulty'],
+  {
+    label: 'Easy' | 'Medium' | 'Hard';
+    bars: 1 | 2 | 3;
+    badgeClass: string;
+    activeBarClass: string;
+    inactiveBarClass: string;
+  }
+> = {
+  easy: {
+    label: 'Easy',
+    bars: 1,
+    badgeClass: 'bg-emerald-500/10 border-emerald-500/40 text-emerald-300',
+    activeBarClass: 'bg-emerald-400',
+    inactiveBarClass: 'bg-emerald-500/20',
+  },
+  medium: {
+    label: 'Medium',
+    bars: 2,
+    badgeClass: 'bg-amber-500/10 border-amber-500/40 text-amber-300',
+    activeBarClass: 'bg-amber-400',
+    inactiveBarClass: 'bg-amber-500/20',
+  },
+  hard: {
+    label: 'Hard',
+    bars: 3,
+    badgeClass: 'bg-rose-500/10 border-rose-500/40 text-rose-300',
+    activeBarClass: 'bg-rose-400',
+    inactiveBarClass: 'bg-rose-500/20',
+  },
+};
+
+const DifficultyBadge: React.FC<{ difficulty: AlgorithmProblem['difficulty']; fixedWidth?: boolean }> = ({
+  difficulty,
+  fixedWidth = false,
+}) => {
+  const meta = DIFFICULTY_META[difficulty];
+  return (
+    <span
+      aria-label={`Difficulty: ${meta.label}`}
+      className={`inline-flex items-center justify-center gap-1.5 px-2.5 py-0.5 rounded-md border text-[11px] font-semibold tracking-tight whitespace-nowrap shrink-0 ${meta.badgeClass} ${
+        fixedWidth ? 'min-w-[84px]' : ''
+      }`}
+    >
+      <span className="inline-flex items-end gap-0.5 h-3" aria-hidden="true">
+        <span className={`w-[3px] h-1 rounded-xs ${meta.bars >= 1 ? meta.activeBarClass : meta.inactiveBarClass}`} />
+        <span className={`w-[3px] h-2 rounded-xs ${meta.bars >= 2 ? meta.activeBarClass : meta.inactiveBarClass}`} />
+        <span className={`w-[3px] h-3 rounded-xs ${meta.bars >= 3 ? meta.activeBarClass : meta.inactiveBarClass}`} />
+      </span>
+      <span>{meta.label}</span>
+    </span>
+  );
+};
+
 export const ProblemsExplorerView: React.FC<ProblemsExplorerViewProps> = ({
   onSelectProblem,
   onGoHome,
@@ -149,7 +204,7 @@ export const ProblemsExplorerView: React.FC<ProblemsExplorerViewProps> = ({
                   {filteredProblems.length} / {ALGORITHM_PROBLEMS.length}
                 </span>
               </div>
-              <DailyStreakCounter streak={dailyStreak ?? readStoredDailyStreak()} />
+              <DailyStreakCounter streak={dailyStreak ?? readStoredDailyStreak()} align="left" />
             </div>
 
             {/* Search + Week + Difficulty Filter Controls */}
@@ -231,17 +286,7 @@ export const ProblemsExplorerView: React.FC<ProblemsExplorerViewProps> = ({
                 <span className="text-xs font-mono text-neutral-500">
                   W{dailyProblem.week || 1} · {dailyProblem.category || dailyProblem.topics[0]}
                 </span>
-                <span
-                  className={`text-xs font-medium capitalize ${
-                    dailyProblem.difficulty === 'easy'
-                      ? 'text-emerald-400'
-                      : dailyProblem.difficulty === 'hard'
-                      ? 'text-rose-400'
-                      : 'text-amber-400'
-                  }`}
-                >
-                  {dailyProblem.difficulty}
-                </span>
+                <DifficultyBadge difficulty={dailyProblem.difficulty} />
               </div>
             </div>
 
@@ -368,21 +413,11 @@ export const ProblemsExplorerView: React.FC<ProblemsExplorerViewProps> = ({
 
                       <div className="flex items-center gap-4 shrink-0">
                         {problem.week && (
-                          <span className="hidden sm:inline text-[11px] font-mono text-neutral-500">
+                          <span className="hidden md:inline max-w-[180px] truncate text-[11px] font-mono text-neutral-500">
                             W{problem.week} · {problem.category || problem.topics[0]}
                           </span>
                         )}
-                        <span
-                          className={`text-xs font-medium w-14 text-right ${
-                            problem.difficulty === 'easy'
-                              ? 'text-emerald-400'
-                              : problem.difficulty === 'hard'
-                              ? 'text-rose-400'
-                              : 'text-amber-400'
-                          }`}
-                        >
-                          {problem.difficulty}
-                        </span>
+                        <DifficultyBadge difficulty={problem.difficulty} fixedWidth />
                       </div>
                     </button>
                   </div>

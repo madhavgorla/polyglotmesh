@@ -17,6 +17,18 @@ export interface SandboxAudit {
   statementLimit?: number;
 }
 
+export interface ExecutionTelemetry {
+  executionTimeMs: number;
+  compileTimeMs?: number;
+  peakMemoryKb: number;
+  memoryUsedMb: number;
+  memoryLimitMb: number;
+  timeoutLimitMs: number;
+  engine: string;
+  backendSource: 'graalvm-backend' | 'polyglot-sandbox';
+  measuredAt: string;
+}
+
 export interface ExecutionResponse {
   success: boolean;
   executionId?: string;
@@ -24,8 +36,11 @@ export interface ExecutionResponse {
   output: string;
   error: string | null;
   executionTimeMs: number;
+  memoryUsedMb?: number;
+  peakMemoryKb?: number;
   engine?: string;
   sandboxAudit?: SandboxAudit;
+  telemetry?: ExecutionTelemetry;
 }
 
 export interface SavedScript {
@@ -56,6 +71,8 @@ export interface PerformanceMetrics {
   successCount: number;
   failureCount: number;
   avgExecutionTimeMs: number;
+  avgMemoryMb?: number;
+  avgPeakMemoryKb?: number;
   languageCounts: {
     python: number;
     javascript: number;
@@ -172,5 +189,9 @@ export interface DebugResponse {
   } | null;
   finalOutput: string;
   executionTimeMs: number;
+  memoryUsedMb?: number;
+  peakMemoryKb?: number;
+  engine?: string;
+  telemetry?: ExecutionTelemetry;
   truncated?: boolean;
 }

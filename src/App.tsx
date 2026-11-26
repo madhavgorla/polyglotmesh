@@ -50,6 +50,7 @@ export default function App() {
   const [appMode, setAppMode] = useState<AppMode>('home');
   const [selectedProblem, setSelectedProblem] = useState<AlgorithmProblem>(ALGORITHM_PROBLEMS[0]);
   const [solverLang, setSolverLang] = useState<SolverLanguage>('python');
+  const [solverInitialTab, setSolverInitialTab] = useState<'description' | 'visualiser'>('description');
   const [solvedIds, setSolvedIds] = useState<string[]>(readStoredSolvedIds);
   const [solveTimestamps, setSolveTimestamps] = useState<Record<string, string>>(readStoredTimestamps);
   const [storedStreakDates, setStoredStreakDates] = useState<string[]>(
@@ -110,16 +111,14 @@ export default function App() {
       }
       return [...prev, id];
     });
-    setSolveTimestamps((prev) => {
-      if (wasSolved || prev[id]) {
-        const next = { ...prev };
-        delete next[id];
-        const remainingDates = extractDatesFromTimestamps(next);
-        setStoredStreakDates(remainingDates);
-        return next;
-      }
-      return { ...prev, [id]: new Date().toISOString() };
-    });
+    if (wasSolved || solveTimestamps[id]) {
+      const next = { ...solveTimestamps };
+      delete next[id];
+      setSolveTimestamps(next);
+      setStoredStreakDates(extractDatesFromTimestamps(next));
+    } else {
+      setSolveTimestamps((prev) => ({ ...prev, [id]: new Date().toISOString() }));
+    }
   };
 
   const handleResetProgress = () => {
@@ -130,10 +129,12 @@ export default function App() {
 
   const openProblemInSolver = (
     problem: AlgorithmProblem,
-    lang: SolverLanguage = 'python'
+    lang: SolverLanguage = 'python',
+    initialTab: 'description' | 'visualiser' = 'description'
   ) => {
     setSelectedProblem(problem);
     setSolverLang(lang);
+    setSolverInitialTab(initialTab);
     setAppMode('solve');
     window.scrollTo({ top: 0, behavior: 'instant' });
   };
@@ -198,8 +199,9 @@ export default function App() {
           solvedIds={solvedIds}
           dailyStreak={dailyStreak}
           initialLanguage={solverLang}
+          initialTab={solverInitialTab}
           isSolved={solvedIds.includes(selectedProblem.id)}
-          onSelectProblem={(p) => openProblemInSolver(p, solverLang)}
+          onSelectProblem={(p) => openProblemInSolver(p, solverLang, 'description')}
           onBackToProblems={() => setAppMode('problems')}
           onGoHome={() => {
             setAppMode('home');
@@ -282,7 +284,7 @@ export default function App() {
             setAppMode('problems');
             window.scrollTo({ top: 0, behavior: 'instant' });
           }}
-          onOpenProblem={(prob, lang) => openProblemInSolver(prob, lang || 'python')}
+          onOpenProblem={(prob, lang, tab) => openProblemInSolver(prob, lang || 'python', tab || 'description')}
         />
       </main>
 

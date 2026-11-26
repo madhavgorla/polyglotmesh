@@ -55,9 +55,18 @@ import { LiveMemoryVisualiser } from './LiveMemoryVisualiser';
 import { PlaybackBar } from './PlaybackBar';
 import { ConfettiBurst } from './ConfettiBurst';
 import { DailyStreakCounter } from './DailyStreakCounter';
+import {
+  ExecutionMetricsTracker,
+  SessionTelemetryEntry
+} from './ExecutionMetricsTracker';
 import { configureLeetCodeMonaco } from './monacoLeetCodeSetup';
 import { DailyStreakState, readStoredDailyStreak } from '../../utils/dailyStreak';
-import { DebugResponse, DebugStep, SolverLanguage } from '../../types';
+import {
+  DebugResponse,
+  DebugStep,
+  ExecutionTelemetry,
+  SolverLanguage
+} from '../../types';
 
 const LANGUAGE_LABELS: Record<SolverLanguage, string> = {
   python: 'Python 3',
@@ -77,6 +86,7 @@ interface JudgeCaseResult {
   actualOutput: string;
   expectedOutput: string;
   error: string | null;
+  runtimeMs?: number;
 }
 
 interface JudgeVerdictResponse {
@@ -89,6 +99,10 @@ interface JudgeVerdictResponse {
   passedCount: number;
   totalCount: number;
   runtimeMs: number;
+  compileTimeMs?: number;
+  memoryUsedMb?: number;
+  peakMemoryKb?: number;
+  telemetry?: ExecutionTelemetry;
   complexity?: ProblemComplexityResult;
   cases: JudgeCaseResult[];
   errorLine?: number | null;
@@ -109,6 +123,7 @@ interface ProblemSolverViewProps {
   solvedIds?: string[];
   dailyStreak?: DailyStreakState;
   initialLanguage?: SolverLanguage;
+  initialTab?: 'description' | 'visualiser';
   isSolved?: boolean;
   onSelectProblem?: (problem: AlgorithmProblem) => void;
   onBackToProblems: () => void;
@@ -212,6 +227,7 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
   solvedIds = [],
   dailyStreak,
   initialLanguage = 'python',
+  initialTab = 'description',
   isSolved,
   onSelectProblem,
   onBackToProblems,
@@ -227,7 +243,8 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
   const [confettiTrigger, setConfettiTrigger] = useState<number>(0);
 
   // Left & Bottom Panel Tabs
-  const [leftTab, setLeftTab] = useState<'description' | 'notes' | 'submissions' | 'visualiser'>('description');
+  const [leftTab, setLeftTab] = useState<'description' | 'notes' | 'submissions' | 'visualiser'>(initialTab);
+  const [runtimeAvailability, setRuntimeAvailability] = useState<Partial<Record<SolverLanguage, boolean>>>({});
   const [bottomTab, setBottomTab] = useState<'cases' | 'result'>('cases');
   const [topicsOpen, setTopicsOpen] = useState<boolean>(false);
   const [openHints, setOpenHints] = useState<[boolean, boolean]>([false, false]);
@@ -243,6 +260,8 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
   const [activeResultCaseIdx, setActiveResultCaseIdx] = useState<number>(0);
   const [isRunning, setIsRunning] = useState<boolean>(false);
   const [judgeResult, setJudgeResult] = useState<JudgeVerdictResponse | null>(null);
+  const [latestTelemetry, setLatestTelemetry] = useState<ExecutionTelemetry | null>(null);
+  const [sessionTelemetry, setSessionTelemetry] = useState<SessionTelemetryEntry[]>([]);
 
   // Syntax & Live Debugger State
   const [syntaxErrors, setSyntaxErrors] = useState<
@@ -274,7 +293,7 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
 
   // LeetCode Workspace UX Controls (Resizable Panes, Timer, Settings, Problem Switcher)
   const [leftWidthPct, setLeftWidthPct] = useState<number>(43);
-  const [consoleHeightPx, setConsoleHeightPx] = useState<number>(220);
+  const [consoleHeightPx, setConsoleHeightPx] = useState<number>(300);
   const [consoleCollapsed, setConsoleCollapsed] = useState<boolean>(false);
   const [editorMaximized, setEditorMaximized] = useState<boolean>(false);
   const [settingsOpen, setSettingsOpen] = useState<boolean>(false);
@@ -388,6 +407,35 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
     setBreakpoints([]);
     setEditorMarkers(null, null);
   }, [problem, lang, leetcodeSpec, setEditorMarkers]);
+
+  // Fetch live container runtime availability (Python, JS, TS, C, C++, Java)
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/health')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!cancelled && data?.runtimes && typeof data.runtimes === 'object') {
+          setRuntimeAvailability(data.runtimes);
+        }
+      })
+      .catch(() => {
+        // Keep optimistic defaults when health probe fails
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Honor initialTab when opening a problem in Visualiser mode
+  useEffect(() => {
+    setLeftTab(initialTab);
+  }, [problem.id, initialTab]);
+
+  // Clear per-problem telemetry history only when problem switches (allows comparing languages on same problem)
+  useEffect(() => {
+    setLatestTelemetry(null);
+    setSessionTelemetry([]);
+  }, [problem.id]);
 
   // Save draft on code changes
   useEffect(() => {
@@ -508,6 +556,22 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
         } else {
           setDebugStepIndex((prev) =>
             Math.min(prev, Math.max(0, nextSteps.length - 1))
+          );
+        }
+
+        if (!silent && data.telemetry) {
+          setLatestTelemetry(data.telemetry);
+          setSessionTelemetry((prev) =>
+            [
+              {
+                id: `dbg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`,
+                action: 'Debug' as const,
+                language: lang,
+                verdict: data.success ? 'Trace Ready' : (runErr?.type || 'Debug Error'),
+                telemetry: data.telemetry!
+              },
+              ...prev
+            ].slice(0, 20)
           );
         }
       } catch (err: any) {
@@ -729,6 +793,50 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
         const data: JudgeVerdictResponse = await res.json();
         setJudgeResult({ ...data, isSubmit });
 
+        const hasRealExecutionMetrics =
+          data.verdict !== 'Runtime Error' &&
+          data.verdict !== 'Compile Error' &&
+          typeof data.peakMemoryKb === 'number' &&
+          data.peakMemoryKb > 0;
+
+        const resolvedTelemetry: ExecutionTelemetry | null = data.telemetry
+          ? data.telemetry
+          : hasRealExecutionMetrics && typeof data.runtimeMs === 'number'
+          ? {
+              executionTimeMs: Math.max(1, data.runtimeMs),
+              ...(typeof data.compileTimeMs === 'number'
+                ? { compileTimeMs: data.compileTimeMs }
+                : {}),
+              peakMemoryKb: data.peakMemoryKb!,
+              memoryUsedMb:
+                data.memoryUsedMb ??
+                Math.round(((data.peakMemoryKb! / 1024) + Number.EPSILON) * 100) / 100,
+              memoryLimitMb: lang === 'java' ? 128 : 256,
+              timeoutLimitMs: 3000,
+              engine: `${LANGUAGE_LABELS[lang] || lang} Runtime`,
+              backendSource: 'polyglot-sandbox',
+              measuredAt: new Date().toISOString()
+            }
+          : null;
+
+        if (resolvedTelemetry) {
+          setLatestTelemetry(resolvedTelemetry);
+          setSessionTelemetry((prev) =>
+            [
+              {
+                id: `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`,
+                action: (isSubmit ? 'Submit' : 'Run') as 'Run' | 'Submit',
+                language: lang,
+                verdict: data.verdict,
+                passedCount: data.passedCount,
+                totalCount: data.totalCount,
+                telemetry: resolvedTelemetry
+              },
+              ...prev
+            ].slice(0, 20)
+          );
+        }
+
         if (isSubmit && data.verdict) {
           const nextSubs = saveProblemSubmission({
             id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
@@ -738,6 +846,9 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
             passedCount: data.passedCount ?? 0,
             totalCount: data.totalCount ?? casesToRun.length,
             runtimeMs: data.runtimeMs ?? 0,
+            memoryUsedMb: resolvedTelemetry?.memoryUsedMb,
+            peakMemoryKb: resolvedTelemetry?.peakMemoryKb,
+            engine: resolvedTelemetry?.engine,
             code,
             complexity: data.complexity,
             createdAt: new Date().toISOString()
@@ -798,10 +909,10 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
   );
 
   const debugSpecificCase = useCallback(
-    (caseIdx: number) => {
+    (caseIdx: number, startPlayback = false) => {
       const targetTc = testCases[caseIdx] || leetcodeSpec.hiddenTestCases[caseIdx - testCases.length] || testCases[0];
-      if (!targetTc || !code.trim()) {
-        runDebugTrace(code, false);
+      if (!targetTc || !code.trim() || leetcodeSpec.isDesignClass) {
+        runDebugTrace(code, startPlayback);
         return;
       }
 
@@ -829,12 +940,12 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
           ? `_debug_res = Solution().${methodName}(${callArgs})`
           : `_debug_res = ${methodName}(${callArgs})`;
         const tracedCode = `${code.trimEnd()}\n\n${argLines.join('\n')}\n${invokeLine}\nprint(_debug_res)`;
-        runDebugTrace(tracedCode, false);
+        runDebugTrace(tracedCode, startPlayback);
         return;
       }
 
       if (lang === 'java' || lang === 'c' || lang === 'cpp') {
-        runDebugTrace(code, false);
+        runDebugTrace(code, startPlayback);
         return;
       }
 
@@ -854,9 +965,37 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
         ? `const _debugResult = new Solution().${methodName}(${callArgs});`
         : `const _debugResult = ${methodName}(${callArgs});`;
       const tracedCode = `${code.trimEnd()}\n\n${jsArgLines.join('\n')}\n${invokeLine}\nconsole.log(_debugResult);`;
-      runDebugTrace(tracedCode, false);
+      runDebugTrace(tracedCode, startPlayback);
     },
     [code, lang, leetcodeSpec, testCases, runDebugTrace]
+  );
+
+  const handleVisualiseCode = useCallback(
+    (startPlayback = false) => {
+      if (
+        (lang === 'python' || lang === 'javascript' || lang === 'typescript') &&
+        !leetcodeSpec.isDesignClass &&
+        code.trim()
+      ) {
+        const escapedMethod = leetcodeSpec.methodName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const definesTarget = new RegExp(`\\b${escapedMethod}\\b`).test(code);
+        const nonDefLines = code
+          .split(/\r?\n/)
+          .filter((ln) => !/^\s*(?:def|function|const|let|var|class|#|\/\/)\b/.test(ln))
+          .join('\n');
+        const alreadyInvokesAtTopLevel =
+          new RegExp(`(?:new\\s+Solution\\(\\)\\.|Solution\\(\\)\\.)${escapedMethod}\\s*\\(`).test(
+            nonDefLines
+          ) ||
+          new RegExp(`^[^\\s].*\\b${escapedMethod}\\s*\\(`, 'm').test(nonDefLines);
+        if (definesTarget && !alreadyInvokesAtTopLevel) {
+          debugSpecificCase(activeCaseIdx, startPlayback);
+          return;
+        }
+      }
+      runDebugTrace(code, startPlayback);
+    },
+    [lang, leetcodeSpec.isDesignClass, leetcodeSpec.methodName, code, activeCaseIdx, debugSpecificCase, runDebugTrace]
   );
 
   useEffect(() => {
@@ -1239,7 +1378,7 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
         <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
           <button
             type="button"
-            onClick={() => runDebugTrace(code, false)}
+            onClick={() => handleVisualiseCode(false)}
             disabled={isDebugging}
             className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium border transition-colors whitespace-nowrap shrink-0 ${
               leftTab === 'visualiser'
@@ -1353,7 +1492,7 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
       {/* Main Split Workspace */}
       <div
         ref={workspaceRef}
-        className="flex-1 min-h-0 flex flex-col lg:flex-row p-2 gap-2 lg:gap-0 overflow-hidden"
+        className="flex-1 min-h-0 flex flex-col lg:flex-row p-2 gap-2 lg:gap-0 overflow-y-auto lg:overflow-hidden"
       >
         {/* Left Pane: DESCRIPTION / NOTES / VISUALISER */}
         {!editorMaximized && (
@@ -1406,7 +1545,7 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
                   onClick={() => {
                     setLeftTab('visualiser');
                     if (debugSteps.length === 0 || debugDirty) {
-                      runDebugTrace(code, false);
+                      handleVisualiseCode(false);
                     }
                   }}
                   className={`py-2.5 border-b-2 transition-colors whitespace-nowrap shrink-0 ${
@@ -1645,6 +1784,12 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
 
                               <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono text-neutral-500 tabular-nums">
                                 <span>{sub.runtimeMs} ms</span>
+                                {typeof sub.memoryUsedMb === 'number' && (
+                                  <>
+                                    <span>·</span>
+                                    <span>{sub.memoryUsedMb.toFixed(2)} MB</span>
+                                  </>
+                                )}
                                 {sub.complexity && (
                                   <>
                                     <span>·</span>
@@ -1727,7 +1872,7 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
                       <div className="flex flex-wrap items-center justify-between gap-2 px-3.5 py-2 border-b border-neutral-800 bg-neutral-950">
                         <button
                           type="button"
-                          onClick={() => runDebugTrace(code, false)}
+                          onClick={() => handleVisualiseCode(false)}
                           disabled={isDebugging}
                           className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-semibold bg-amber-950/50 border border-amber-600/50 text-amber-300 hover:bg-amber-900/50 transition-colors disabled:opacity-50"
                         >
@@ -1751,7 +1896,7 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
                           isPlaying={isPlayingDebug}
                           onTogglePlay={() => {
                             if (debugDirty || debugSteps.length === 0) {
-                              runDebugTrace(code, true);
+                              handleVisualiseCode(true);
                               return;
                             }
                             if (
@@ -1773,7 +1918,7 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
                           onNext={() => {
                             setIsPlayingDebug(false);
                             if (debugDirty || debugSteps.length === 0) {
-                              runDebugTrace(code, false);
+                              handleVisualiseCode(false);
                             } else {
                               setDebugStepIndex((s) =>
                                 Math.min(
@@ -1826,7 +1971,7 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
         {/* Right Pane: CODE EDITOR (Top) + TESTCASE / TEST RESULT (Bottom) */}
         <section
           ref={rightPaneRef}
-          className="flex-1 min-w-0 flex flex-col min-h-0"
+          className="flex-1 min-w-0 flex flex-col min-h-[540px] lg:min-h-0"
         >
           {/* Code Editor Panel */}
           <div className="flex-1 rounded-lg border border-neutral-800 bg-[#0b0b0e] flex flex-col overflow-hidden min-h-[220px] relative">
@@ -1844,9 +1989,15 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
                   <option value="python">Python 3</option>
                   <option value="javascript">JavaScript</option>
                   <option value="typescript">TypeScript</option>
-                  <option value="java">Java</option>
-                  <option value="c">C</option>
-                  <option value="cpp">C++</option>
+                  <option value="java">
+                    {runtimeAvailability.java === false ? 'Java (Unavailable)' : 'Java'}
+                  </option>
+                  <option value="c">
+                    {runtimeAvailability.c === false ? 'C (Unavailable)' : 'C'}
+                  </option>
+                  <option value="cpp">
+                    {runtimeAvailability.cpp === false ? 'C++ (Unavailable)' : 'C++'}
+                  </option>
                 </select>
 
                 <button
@@ -2051,6 +2202,22 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
               </div>
             </div>
 
+            {/* Runtime Availability Notice when a language runtime is absent in container */}
+            {runtimeAvailability[lang] === false && (
+              <div className="px-4 py-1.5 border-b border-amber-800/50 bg-amber-950/30 flex flex-wrap items-center justify-between gap-2 text-[11px] text-amber-200">
+                <span>
+                  {LANGUAGE_LABELS[lang]} runtime is not installed in this container. Switch to Python 3, JavaScript, TypeScript, C, or C++ to run code.
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setLang('python')}
+                  className="font-medium text-amber-300 hover:text-amber-200 underline underline-offset-2 whitespace-nowrap"
+                >
+                  Switch to Python 3
+                </button>
+              </div>
+            )}
+
             {/* Subtle LeetCode Method Signature Hint Strip when Editor is Empty */}
             {!code.trim() && (
               <div className="px-4 py-2 border-b border-neutral-800/60 bg-[#0d0d11] flex flex-wrap items-center justify-between gap-2 text-[11px]">
@@ -2146,18 +2313,35 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
                 );
               })()}
 
-            {/* Editor Bottom Status Bar (Saved draft · Shortcuts · Cursor Ln/Col) */}
+            {/* Editor Bottom Status Bar (Saved draft · Shortcuts · Telemetry · Cursor Ln/Col) */}
             <div className="h-7 px-3.5 border-t border-neutral-800/80 bg-[#0d0d10] flex items-center justify-between text-[11px] font-mono text-neutral-500">
-              <div className="flex items-center gap-3">
-                <span>{code.trim() ? 'Draft saved' : 'Empty'}</span>
+              <div className="flex items-center gap-3 min-w-0">
+                <span className="whitespace-nowrap">{code.trim() ? 'Draft saved' : 'Empty'}</span>
                 <span className="hidden sm:inline text-neutral-700">·</span>
-                <span className="hidden sm:inline">
+                <span className="hidden sm:inline truncate">
                   Ctrl+Enter Run · Ctrl+Shift+Enter Submit
                 </span>
               </div>
-              <span className="tabular-nums">
-                Ln {cursorPos.line}, Col {cursorPos.column}
-              </span>
+              <div className="flex items-center gap-3 shrink-0">
+                {latestTelemetry && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setBottomTab('result');
+                      setConsoleCollapsed(false);
+                    }}
+                    title="Inspect live execution time & memory tracker"
+                    className="hidden sm:inline-flex items-center gap-1.5 text-[11px] text-neutral-400 hover:text-emerald-400 transition-colors tabular-nums whitespace-nowrap"
+                  >
+                    <span>{latestTelemetry.executionTimeMs} ms</span>
+                    <span className="text-neutral-700">·</span>
+                    <span>{latestTelemetry.memoryUsedMb.toFixed(2)} MB</span>
+                  </button>
+                )}
+                <span className="tabular-nums whitespace-nowrap">
+                  Ln {cursorPos.line}, Col {cursorPos.column}
+                </span>
+              </div>
             </div>
           </div>
 
@@ -2305,9 +2489,17 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
                     )}
                   </div>
                 ) : isRunning ? (
-                  <div className="flex items-center gap-2 text-neutral-400">
-                    <Loader2 className="w-4 h-4 animate-spin text-emerald-400" />
-                    <span>Running testcases inside PolyglotMesh judge...</span>
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-2 text-neutral-400">
+                      <Loader2 className="w-4 h-4 animate-spin text-emerald-400" />
+                      <span>Running testcases &amp; measuring runtime telemetry...</span>
+                    </div>
+                    <ExecutionMetricsTracker
+                      telemetry={latestTelemetry}
+                      complexity={judgeResult?.complexity}
+                      history={sessionTelemetry}
+                      isRunning
+                    />
                   </div>
                 ) : judgeResult ? (
                   <div className="space-y-3">
@@ -2331,13 +2523,6 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
                         </span>
                       </div>
                       <div className="flex flex-wrap items-center gap-3 text-neutral-400 tabular-nums">
-                        <span>Runtime: {judgeResult.runtimeMs} ms</span>
-                        {judgeResult.complexity && (
-                          <span title={judgeResult.complexity.notes.join(' · ')}>
-                            · Time: <span className="text-neutral-200">{judgeResult.complexity.time}</span> · Space:{' '}
-                            <span className="text-neutral-200">{judgeResult.complexity.space}</span>
-                          </span>
-                        )}
                         {judgeResult.verdict === 'Accepted' &&
                           onSelectProblem &&
                           currentProblemIndex >= 0 &&
@@ -2353,6 +2538,14 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
                           )}
                       </div>
                     </div>
+
+                    {/* Real-Time Execution & Memory Tracker */}
+                    <ExecutionMetricsTracker
+                      telemetry={latestTelemetry}
+                      complexity={judgeResult.complexity}
+                      history={sessionTelemetry}
+                      isRunning={false}
+                    />
 
                     {/* Top-level Compile / Runtime Error Box */}
                     {judgeResult.errorMessage && (
@@ -2412,8 +2605,13 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
                         {activeResultCase && (
                           <div className="space-y-2.5">
                             <div className="space-y-1">
-                              <div className="text-[11px] text-neutral-500">
-                                Input
+                              <div className="flex items-center justify-between text-[11px] text-neutral-500">
+                                <span>Input</span>
+                                {typeof activeResultCase.runtimeMs === 'number' && (
+                                  <span className="font-mono tabular-nums text-neutral-400">
+                                    Case runtime: {activeResultCase.runtimeMs} ms
+                                  </span>
+                                )}
                               </div>
                               <pre className="p-2.5 rounded-md bg-[#121216] border border-neutral-800/80 text-neutral-200 whitespace-pre-wrap">
                                 {activeResultCase.inputDisplay}
@@ -2464,11 +2662,18 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
                     )}
                   </div>
                 ) : (
-                  <div className="text-neutral-500">
-                    You must run your code first. Press{' '}
-                    <span className="text-neutral-300">Run</span> (Ctrl+Enter)
-                    or <span className="text-neutral-300">Submit</span>{' '}
-                    (Ctrl+Shift+Enter).
+                  <div className="space-y-3">
+                    <div className="text-neutral-500">
+                      You must run your code first. Press{' '}
+                      <span className="text-neutral-300">Run</span> (Ctrl+Enter)
+                      or <span className="text-neutral-300">Submit</span>{' '}
+                      (Ctrl+Shift+Enter).
+                    </div>
+                    <ExecutionMetricsTracker
+                      telemetry={latestTelemetry}
+                      history={sessionTelemetry}
+                      isRunning={false}
+                    />
                   </div>
                 )}
               </div>

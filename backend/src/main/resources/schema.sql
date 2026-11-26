@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS execution_history (
     output TEXT,
     error TEXT,
     execution_time_ms BIGINT NOT NULL,
+    peak_memory_kb BIGINT DEFAULT 0,
     success BOOLEAN NOT NULL,
     engine VARCHAR(100),
     executed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()

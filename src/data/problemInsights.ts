@@ -20,6 +20,9 @@ export interface ProblemSubmissionRecord {
   passedCount: number;
   totalCount: number;
   runtimeMs: number;
+  memoryUsedMb?: number;
+  peakMemoryKb?: number;
+  engine?: string;
   code: string;
   complexity?: ProblemComplexityResult;
   createdAt: string;

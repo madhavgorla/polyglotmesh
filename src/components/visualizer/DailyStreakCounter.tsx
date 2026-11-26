@@ -5,11 +5,13 @@ import { DailyStreakState } from '../../utils/dailyStreak';
 interface DailyStreakCounterProps {
   streak: DailyStreakState;
   onOpenProblems?: () => void;
+  align?: 'left' | 'right';
 }
 
 export const DailyStreakCounter: React.FC<DailyStreakCounterProps> = ({
   streak,
   onOpenProblems,
+  align = 'right',
 }) => {
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -74,7 +76,11 @@ export const DailyStreakCounter: React.FC<DailyStreakCounterProps> = ({
       </button>
 
       {open && (
-        <div className="absolute right-0 mt-2 w-64 rounded-lg border border-neutral-800 bg-[#111115] p-3.5 shadow-xl z-50 space-y-3 text-xs">
+        <div
+          className={`absolute ${
+            align === 'left' ? 'left-0' : 'right-0'
+          } mt-2 w-64 max-w-[calc(100vw-2rem)] rounded-lg border border-neutral-800 bg-[#111115] p-3.5 shadow-xl z-50 space-y-3 text-xs`}
+        >
           <div className="flex items-center justify-between border-b border-neutral-800/80 pb-2">
             <span className="font-semibold text-white">Daily Streak</span>
             <span className="font-mono tabular-nums text-amber-400 font-semibold">

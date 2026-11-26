@@ -17,6 +17,9 @@ public class ExecutionResponse {
     private String output;
     private String error;
     private long executionTimeMs;
+    private Double memoryUsedMb;
+    private Long peakMemoryKb;
+    private Long allocatedBytes;
     private String engine;
     private Map<String, Object> sandboxAudit;
 
@@ -56,6 +59,12 @@ public class ExecutionResponse {
     public void setError(String error) { this.error = error; }
     public long getExecutionTimeMs() { return executionTimeMs; }
     public void setExecutionTimeMs(long executionTimeMs) { this.executionTimeMs = executionTimeMs; }
+    public Double getMemoryUsedMb() { return memoryUsedMb; }
+    public void setMemoryUsedMb(Double memoryUsedMb) { this.memoryUsedMb = memoryUsedMb; }
+    public Long getPeakMemoryKb() { return peakMemoryKb; }
+    public void setPeakMemoryKb(Long peakMemoryKb) { this.peakMemoryKb = peakMemoryKb; }
+    public Long getAllocatedBytes() { return allocatedBytes; }
+    public void setAllocatedBytes(Long allocatedBytes) { this.allocatedBytes = allocatedBytes; }
     public String getEngine() { return engine; }
     public void setEngine(String engine) { this.engine = engine; }
     public Map<String, Object> getSandboxAudit() { return sandboxAudit; }
