@@ -1,4 +1,5 @@
 import { AlgorithmProblem } from './visualizerProblems';
+import { SolverLanguage } from '../types';
 
 export interface LeetCodeParamSpec {
   name: string;
@@ -504,10 +505,10 @@ function buildPythonStub(
   isDesignClass?: boolean
 ): string {
   if (isDesignClass) {
-    return `class ${methodName}:\n    def __init__(self):\n        \n`;
+    return `class ${methodName}:\n    def __init__(self):\n        pass\n`;
   }
   const sigParams = ['self', ...params.map((p) => `${p.name}: ${p.pyType}`)].join(', ');
-  return `class Solution:\n    def ${methodName}(${sigParams}) -> ${returnType}:\n        `;
+  return `class Solution:\n    def ${methodName}(${sigParams}) -> ${returnType}:\n        pass`;
 }
 
 function buildJavaScriptStub(
@@ -846,4 +847,26 @@ export function getLeetCodeSpec(problem: AlgorithmProblem): LeetCodeProblemSpec 
     cppStub: buildCppStub(methodName, params, returnType.py, override.isDesignClass),
     cStub: buildCStub(methodName, params, returnType.py, override.isDesignClass)
   };
+}
+
+export function getStarterStubForLanguage(
+  spec: LeetCodeProblemSpec,
+  language: SolverLanguage
+): string {
+  switch (language) {
+    case 'python':
+      return spec.pythonStub;
+    case 'javascript':
+      return spec.javascriptStub;
+    case 'typescript':
+      return spec.typescriptStub;
+    case 'java':
+      return spec.javaStub;
+    case 'c':
+      return spec.cStub;
+    case 'cpp':
+      return spec.cppStub;
+    default:
+      return spec.pythonStub;
+  }
 }

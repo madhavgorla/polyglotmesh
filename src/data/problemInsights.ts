@@ -28,7 +28,22 @@ export interface ProblemSubmissionRecord {
   createdAt: string;
 }
 
+export interface SuccessfulRunSnapshot {
+  id: string;
+  problemId: string;
+  action: 'Run' | 'Submit';
+  language: SolverLanguage;
+  code: string;
+  passedCount: number;
+  totalCount: number;
+  runtimeMs: number;
+  memoryUsedMb?: number;
+  createdAt: string;
+}
+
 const SUBMISSIONS_STORAGE_KEY = 'polyglotmesh_submissions_v1';
+const EXECUTION_HISTORY_STORAGE_KEY = 'polyglotmesh_exec_history_v1';
+export const MAX_EXECUTION_HISTORY = 5;
 
 export function loadProblemSubmissions(problemId?: string): ProblemSubmissionRecord[] {
   try {
@@ -55,6 +70,63 @@ export function saveProblemSubmission(record: ProblemSubmissionRecord): ProblemS
   } catch {
     return [record];
   }
+}
+
+function readAllSuccessfulRunSnapshots(): SuccessfulRunSnapshot[] {
+  try {
+    const raw = window.localStorage.getItem(EXECUTION_HISTORY_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (item): item is SuccessfulRunSnapshot =>
+        Boolean(
+          item &&
+            typeof item.id === 'string' &&
+            typeof item.problemId === 'string' &&
+            typeof item.code === 'string' &&
+            typeof item.language === 'string'
+        )
+    );
+  } catch {
+    return [];
+  }
+}
+
+export function loadSuccessfulRunHistory(problemId: string): SuccessfulRunSnapshot[] {
+  return readAllSuccessfulRunSnapshots()
+    .filter((item) => item.problemId === problemId)
+    .slice(0, MAX_EXECUTION_HISTORY);
+}
+
+export function saveSuccessfulRunSnapshot(record: SuccessfulRunSnapshot): SuccessfulRunSnapshot[] {
+  try {
+    const all = readAllSuccessfulRunSnapshots();
+    const others = all.filter((item) => item.problemId !== record.problemId);
+    const dedupedForProblem = all
+      .filter((item) => item.problemId === record.problemId)
+      .filter((item) => !(item.language === record.language && item.code === record.code));
+    const nextForProblem = [record, ...dedupedForProblem].slice(0, MAX_EXECUTION_HISTORY);
+    window.localStorage.setItem(
+      EXECUTION_HISTORY_STORAGE_KEY,
+      JSON.stringify([...nextForProblem, ...others])
+    );
+    return nextForProblem;
+  } catch {
+    return [record];
+  }
+}
+
+export function clearSuccessfulRunHistory(problemId: string): SuccessfulRunSnapshot[] {
+  try {
+    const remaining = readAllSuccessfulRunSnapshots().filter(
+      (item) => item.problemId !== problemId
+    );
+    window.localStorage.setItem(EXECUTION_HISTORY_STORAGE_KEY, JSON.stringify(remaining));
+  } catch {
+    // Ignore storage errors
+  }
+  return [];
 }
 
 /**

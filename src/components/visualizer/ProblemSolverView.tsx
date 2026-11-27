@@ -25,6 +25,11 @@ import {
   X,
   Code2,
   Check,
+  CheckSquare,
+  TerminalSquare,
+  AlignLeft,
+  Braces,
+  Lock,
   Search,
   History,
   Lightbulb,
@@ -36,13 +41,19 @@ import {
 } from '../../data/visualizerProblems';
 import {
   getLeetCodeSpec,
+  getStarterStubForLanguage,
   LeetCodeTestCase
 } from '../../data/leetcodeSpecs';
 import {
   ProblemComplexityResult,
   ProblemSubmissionRecord,
+  SuccessfulRunSnapshot,
+  MAX_EXECUTION_HISTORY,
   loadProblemSubmissions,
   saveProblemSubmission,
+  loadSuccessfulRunHistory,
+  saveSuccessfulRunSnapshot,
+  clearSuccessfulRunHistory,
   getProblemHints
 } from '../../data/problemInsights';
 import {
@@ -59,6 +70,7 @@ import {
   ExecutionMetricsTracker,
   SessionTelemetryEntry
 } from './ExecutionMetricsTracker';
+import { CodeExecutionHistoryPanel } from './CodeExecutionHistoryPanel';
 import { configureLeetCodeMonaco } from './monacoLeetCodeSetup';
 import { DailyStreakState, readStoredDailyStreak } from '../../utils/dailyStreak';
 import {
@@ -236,8 +248,15 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
   onToggleSolved,
   onOpenCommandPalette
 }) => {
+  // Problem signature spec & language starter template
+  const leetcodeSpec = useMemo(() => getLeetCodeSpec(problem), [problem]);
+
   const [lang, setLang] = useState<SolverLanguage>(initialLanguage);
-  const [code, setCode] = useState<string>(() => readDraft(problem.id, initialLanguage));
+  const [code, setCode] = useState<string>(
+    () =>
+      readDraft(problem.id, initialLanguage) ||
+      getStarterStubForLanguage(leetcodeSpec, initialLanguage)
+  );
   const [noteText, setNoteText] = useState<string>(() => readNote(problem.id));
   const [localSolved, setLocalSolved] = useState<boolean>(false);
   const [confettiTrigger, setConfettiTrigger] = useState<number>(0);
@@ -251,10 +270,20 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
   const [submissions, setSubmissions] = useState<ProblemSubmissionRecord[]>(() =>
     loadProblemSubmissions(problem.id)
   );
+  const [executionHistory, setExecutionHistory] = useState<SuccessfulRunSnapshot[]>(() =>
+    loadSuccessfulRunHistory(problem.id)
+  );
+  const [historyPanelOpen, setHistoryPanelOpen] = useState<boolean>(() =>
+    typeof window !== 'undefined' ? window.innerWidth >= 1200 : true
+  );
+  const [undoRevertSnapshot, setUndoRevertSnapshot] = useState<{
+    code: string;
+    language: SolverLanguage;
+  } | null>(null);
+  const [revertedEntryId, setRevertedEntryId] = useState<string | null>(null);
   const conceptualHints = useMemo(() => getProblemHints(problem), [problem]);
 
   // Testcases & Judge State
-  const leetcodeSpec = useMemo(() => getLeetCodeSpec(problem), [problem]);
   const [testCases, setTestCases] = useState<LeetCodeTestCase[]>(leetcodeSpec.defaultTestCases);
   const [activeCaseIdx, setActiveCaseIdx] = useState<number>(0);
   const [activeResultCaseIdx, setActiveResultCaseIdx] = useState<number>(0);
@@ -295,6 +324,7 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
   const [leftWidthPct, setLeftWidthPct] = useState<number>(43);
   const [consoleHeightPx, setConsoleHeightPx] = useState<number>(300);
   const [consoleCollapsed, setConsoleCollapsed] = useState<boolean>(false);
+  const [editorCollapsed, setEditorCollapsed] = useState<boolean>(false);
   const [editorMaximized, setEditorMaximized] = useState<boolean>(false);
   const [settingsOpen, setSettingsOpen] = useState<boolean>(false);
   const [drawerOpen, setDrawerOpen] = useState<boolean>(false);
@@ -387,7 +417,8 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
   useEffect(() => {
     editSeqRef.current += 1;
     const saved = readDraft(problem.id, lang);
-    setCode(saved);
+    const starter = getStarterStubForLanguage(leetcodeSpec, lang);
+    setCode(saved || starter);
     setNoteText(readNote(problem.id));
     setSubmissions(loadProblemSubmissions(problem.id));
     setOpenHints([false, false]);
@@ -431,16 +462,24 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
     setLeftTab(initialTab);
   }, [problem.id, initialTab]);
 
-  // Clear per-problem telemetry history only when problem switches (allows comparing languages on same problem)
+  // Clear per-problem telemetry & sync per-problem execution history when problem switches
   useEffect(() => {
     setLatestTelemetry(null);
     setSessionTelemetry([]);
+    setExecutionHistory(loadSuccessfulRunHistory(problem.id));
+    setUndoRevertSnapshot(null);
+    setRevertedEntryId(null);
   }, [problem.id]);
 
-  // Save draft on code changes
+  // Save draft on code changes (clear stored draft when identical to starter template)
   useEffect(() => {
-    writeDraft(problem.id, lang, code);
-  }, [problem.id, lang, code]);
+    const starter = getStarterStubForLanguage(leetcodeSpec, lang);
+    if (code === starter) {
+      writeDraft(problem.id, lang, '');
+    } else {
+      writeDraft(problem.id, lang, code);
+    }
+  }, [problem.id, lang, code, leetcodeSpec]);
 
   // Save notes on change
   useEffect(() => {
@@ -474,18 +513,22 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
     editor.focus();
   };
 
+  const formatEditorCode = () => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    const formatAction = editor.getAction?.('editor.action.formatDocument');
+    if (formatAction) {
+      formatAction.run();
+    }
+    editor.focus();
+  };
+
   const insertSignatureStub = () => {
-    const stubMap: Record<SolverLanguage, string> = {
-      python: leetcodeSpec.pythonStub,
-      javascript: leetcodeSpec.javascriptStub,
-      typescript: leetcodeSpec.typescriptStub,
-      java: leetcodeSpec.javaStub,
-      c: leetcodeSpec.cStub,
-      cpp: leetcodeSpec.cppStub
-    };
-    const stub = stubMap[lang] ?? leetcodeSpec.pythonStub;
+    const stub = getStarterStubForLanguage(leetcodeSpec, lang);
     editSeqRef.current += 1;
     setCode(stub);
+    setUndoRevertSnapshot(null);
+    setRevertedEntryId(null);
     setDebugDirty(false);
     setSyntaxErrors([]);
     setDebugSyntaxError(null);
@@ -837,6 +880,24 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
           );
         }
 
+        if (data.verdict === 'Accepted') {
+          const nextHistory = saveSuccessfulRunSnapshot({
+            id: `hist-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+            problemId: problem.id,
+            action: isSubmit ? 'Submit' : 'Run',
+            language: lang,
+            code,
+            passedCount: data.passedCount ?? casesToRun.length,
+            totalCount: data.totalCount ?? casesToRun.length,
+            runtimeMs: data.runtimeMs ?? 0,
+            memoryUsedMb: resolvedTelemetry?.memoryUsedMb,
+            createdAt: new Date().toISOString()
+          });
+          setExecutionHistory(nextHistory);
+          setUndoRevertSnapshot(null);
+          setRevertedEntryId(null);
+        }
+
         if (isSubmit && data.verdict) {
           const nextSubs = saveProblemSubmission({
             id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
@@ -969,6 +1030,51 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
     },
     [code, lang, leetcodeSpec, testCases, runDebugTrace]
   );
+
+  const restoreCodeIntoEditor = useCallback(
+    (targetCode: string, targetLang: SolverLanguage) => {
+      editSeqRef.current += 1;
+      writeDraft(problem.id, targetLang, targetCode);
+      if (targetLang !== lang) {
+        setLang(targetLang);
+      }
+      setCode(targetCode);
+      setDebugDirty(true);
+      setIsPlayingDebug(false);
+      setSyntaxErrors([]);
+      setDebugSyntaxError(null);
+      setDebugRuntimeError(null);
+      setEditorMarkers(null, null);
+      window.setTimeout(() => {
+        editorRef.current?.focus();
+      }, 20);
+    },
+    [problem.id, lang, setEditorMarkers]
+  );
+
+  const handleRevertExecution = useCallback(
+    (entry: SuccessfulRunSnapshot) => {
+      if (code !== entry.code || lang !== entry.language) {
+        setUndoRevertSnapshot({ code, language: lang });
+      }
+      setRevertedEntryId(entry.id);
+      restoreCodeIntoEditor(entry.code, entry.language);
+    },
+    [code, lang, restoreCodeIntoEditor]
+  );
+
+  const handleUndoRevert = useCallback(() => {
+    if (!undoRevertSnapshot) return;
+    restoreCodeIntoEditor(undoRevertSnapshot.code, undoRevertSnapshot.language);
+    setUndoRevertSnapshot(null);
+    setRevertedEntryId(null);
+  }, [undoRevertSnapshot, restoreCodeIntoEditor]);
+
+  const handleClearExecutionHistory = useCallback(() => {
+    setExecutionHistory(clearSuccessfulRunHistory(problem.id));
+    setUndoRevertSnapshot(null);
+    setRevertedEntryId(null);
+  }, [problem.id]);
 
   const handleVisualiseCode = useCallback(
     (startPlayback = false) => {
@@ -1974,224 +2080,28 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
           className="flex-1 min-w-0 flex flex-col min-h-[540px] lg:min-h-0"
         >
           {/* Code Editor Panel */}
-          <div className="flex-1 rounded-lg border border-neutral-800 bg-[#0b0b0e] flex flex-col overflow-hidden min-h-[220px] relative">
-            {/* LeetCode Editor Toolbar */}
-            <div className="flex flex-wrap items-center justify-between gap-2 px-3.5 py-2 border-b border-neutral-800 bg-[#101014] text-xs">
-              <div className="flex items-center gap-2">
-                <select
-                  aria-label="Editor Language"
-                  value={lang}
-                  onChange={(e) =>
-                    setLang(e.target.value as SolverLanguage)
-                  }
-                  className="bg-neutral-900 border border-neutral-800 rounded px-2.5 py-1 text-xs font-medium text-neutral-100 focus:outline-none focus:border-emerald-500 cursor-pointer"
-                >
-                  <option value="python">Python 3</option>
-                  <option value="javascript">JavaScript</option>
-                  <option value="typescript">TypeScript</option>
-                  <option value="java">
-                    {runtimeAvailability.java === false ? 'Java (Unavailable)' : 'Java'}
-                  </option>
-                  <option value="c">
-                    {runtimeAvailability.c === false ? 'C (Unavailable)' : 'C'}
-                  </option>
-                  <option value="cpp">
-                    {runtimeAvailability.cpp === false ? 'C++ (Unavailable)' : 'C++'}
-                  </option>
-                </select>
-
-                <button
-                  type="button"
-                  onClick={insertSignatureStub}
-                  title="Insert empty LeetCode Solution signature (no solution logic)"
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded border border-neutral-800 bg-neutral-900 hover:bg-neutral-800 text-[11px] font-medium text-neutral-300 hover:text-white transition-colors whitespace-nowrap"
-                >
-                  <Code2 className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>Insert Stub</span>
-                </button>
-
-                {code.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      editSeqRef.current += 1;
-                      setCode('');
-                      setDebugDirty(false);
-                      setSyntaxErrors([]);
-                      setDebugSyntaxError(null);
-                      setDebugRuntimeError(null);
-                      setEditorMarkers(null, null);
-                    }}
-                    className="inline-flex items-center gap-1 px-2 py-1 rounded border border-neutral-800 text-[11px] text-neutral-400 hover:text-white hover:bg-neutral-900 transition-colors whitespace-nowrap"
-                    title="Clear code editor"
-                  >
-                    <RotateCcw className="w-3 h-3" />
-                    <span>Clear</span>
-                  </button>
-                )}
+          <div
+            className={`${
+              editorCollapsed ? 'shrink-0' : 'flex-1 min-h-[240px]'
+            } rounded-lg border border-[#3a3a3c] bg-[#262626] flex flex-col overflow-hidden relative`}
+          >
+            {/* Top LeetCode Panel Title Header: </> Code  [Maximize] [^] */}
+            <div className="h-9 px-3.5 bg-[#333333] border-b border-[#3e3e42] flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-2 text-xs font-semibold text-neutral-100">
+                <Code2 className="w-4 h-4 text-[#2cbb5d]" />
+                <span>Code</span>
               </div>
 
-              <div className="flex items-center gap-2">
-                {(() => {
-                  const liveErr = debugSyntaxError || syntaxErrors[0] || null;
-                  if (liveErr) {
-                    return (
-                      <button
-                        type="button"
-                        onClick={() => jumpToLine(liveErr.line)}
-                        className="text-[11px] text-rose-400 hover:text-rose-300 font-mono font-semibold whitespace-nowrap"
-                      >
-                        SyntaxError @ Line {liveErr.line}
-                      </button>
-                    );
-                  }
-                  if (debugRuntimeError) {
-                    return (
-                      <button
-                        type="button"
-                        onClick={() => jumpToLine(debugRuntimeError.line)}
-                        className="text-[11px] text-rose-400 hover:text-rose-300 font-mono font-semibold whitespace-nowrap"
-                      >
-                        {debugRuntimeError.type} @ Line {debugRuntimeError.line}
-                      </button>
-                    );
-                  }
-                  if (debugDirty) {
-                    return (
-                      <span className="text-[11px] text-amber-400 font-mono whitespace-nowrap">
-                        Checking...
-                      </span>
-                    );
-                  }
-                  if (code.trim()) {
-                    return (
-                      <span className="text-[11px] text-emerald-400/90 font-mono whitespace-nowrap">
-                        No errors
-                      </span>
-                    );
-                  }
-                  return null;
-                })()}
-
-                <div className="relative">
-                  <button
-                    type="button"
-                    onClick={() => setSettingsOpen((s) => !s)}
-                    aria-label="Editor settings"
-                    title="Editor settings"
-                    className={`p-1.5 rounded border transition-colors ${
-                      settingsOpen
-                        ? 'border-neutral-600 bg-neutral-800 text-white'
-                        : 'border-transparent text-neutral-400 hover:text-white hover:bg-neutral-800/70'
-                    }`}
-                  >
-                    <Settings2 className="w-3.5 h-3.5" />
-                  </button>
-
-                  {settingsOpen && (
-                    <div className="absolute right-0 top-9 z-40 w-60 rounded-lg border border-neutral-800 bg-[#121216] p-3.5 space-y-3 shadow-xl">
-                      <div className="flex items-center justify-between text-xs font-semibold text-white">
-                        <span>Editor Settings</span>
-                        <button
-                          type="button"
-                          onClick={() => setSettingsOpen(false)}
-                          className="text-neutral-400 hover:text-white"
-                        >
-                          <X className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-
-                      <div className="flex items-center justify-between text-xs">
-                        <span className="text-neutral-400">Font Size</span>
-                        <select
-                          value={editorPrefs.fontSize}
-                          onChange={(e) =>
-                            setEditorPrefs((p) => ({
-                              ...p,
-                              fontSize: Number(e.target.value)
-                            }))
-                          }
-                          className="bg-neutral-900 border border-neutral-800 rounded px-2 py-0.5 text-xs text-neutral-200 tabular-nums"
-                        >
-                          {[12, 13, 14, 15, 16].map((sz) => (
-                            <option key={sz} value={sz}>
-                              {sz}px
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-
-                      <div className="flex items-center justify-between text-xs">
-                        <span className="text-neutral-400">Tab Size</span>
-                        <div className="inline-flex rounded border border-neutral-800 bg-neutral-900 p-0.5">
-                          {([2, 4] as const).map((ts) => (
-                            <button
-                              key={ts}
-                              type="button"
-                              onClick={() =>
-                                setEditorPrefs((p) => ({ ...p, tabSize: ts }))
-                              }
-                              className={`px-2 py-0.5 rounded text-[11px] tabular-nums ${
-                                editorPrefs.tabSize === ts
-                                  ? 'bg-neutral-700 text-white'
-                                  : 'text-neutral-400'
-                              }`}
-                            >
-                              {ts}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-
-                      <div className="flex items-center justify-between text-xs">
-                        <span className="text-neutral-400">Word Wrap</span>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setEditorPrefs((p) => ({
-                              ...p,
-                              wordWrap: p.wordWrap === 'on' ? 'off' : 'on'
-                            }))
-                          }
-                          className={`px-2 py-0.5 rounded border text-[11px] ${
-                            editorPrefs.wordWrap === 'on'
-                              ? 'border-emerald-500/50 bg-emerald-500/15 text-emerald-300'
-                              : 'border-neutral-800 bg-neutral-900 text-neutral-400'
-                          }`}
-                        >
-                          {editorPrefs.wordWrap === 'on' ? 'On' : 'Off'}
-                        </button>
-                      </div>
-
-                      <div className="flex items-center justify-between text-xs">
-                        <span className="text-neutral-400">Autocomplete</span>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setEditorPrefs((p) => ({
-                              ...p,
-                              autocomplete: !p.autocomplete
-                            }))
-                          }
-                          className={`px-2 py-0.5 rounded border text-[11px] ${
-                            editorPrefs.autocomplete
-                              ? 'border-emerald-500/50 bg-emerald-500/15 text-emerald-300'
-                              : 'border-neutral-800 bg-neutral-900 text-neutral-400'
-                          }`}
-                        >
-                          {editorPrefs.autocomplete ? 'On' : 'Off'}
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
+              <div className="flex items-center gap-1">
                 <button
                   type="button"
-                  onClick={() => setEditorMaximized((m) => !m)}
+                  onClick={() => {
+                    setEditorCollapsed(false);
+                    setEditorMaximized((m) => !m);
+                  }}
                   aria-label={editorMaximized ? 'Restore layout' : 'Maximize editor'}
                   title={editorMaximized ? 'Restore layout' : 'Maximize editor'}
-                  className="p-1.5 rounded text-neutral-400 hover:text-white hover:bg-neutral-800/70 transition-colors"
+                  className="p-1.5 rounded text-neutral-400 hover:text-white hover:bg-[#404044] transition-colors"
                 >
                   {editorMaximized ? (
                     <Minimize2 className="w-3.5 h-3.5" />
@@ -2199,150 +2109,468 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
                     <Maximize2 className="w-3.5 h-3.5" />
                   )}
                 </button>
+                <button
+                  type="button"
+                  onClick={() => setEditorCollapsed((c) => !c)}
+                  aria-label={editorCollapsed ? 'Expand code editor' : 'Collapse code editor'}
+                  title={editorCollapsed ? 'Expand code editor' : 'Collapse code editor'}
+                  className="p-1.5 rounded text-neutral-400 hover:text-white hover:bg-[#404044] transition-colors"
+                >
+                  {editorCollapsed ? (
+                    <ChevronDown className="w-3.5 h-3.5" />
+                  ) : (
+                    <ChevronUp className="w-3.5 h-3.5" />
+                  )}
+                </button>
               </div>
             </div>
 
-            {/* Runtime Availability Notice when a language runtime is absent in container */}
-            {runtimeAvailability[lang] === false && (
-              <div className="px-4 py-1.5 border-b border-amber-800/50 bg-amber-950/30 flex flex-wrap items-center justify-between gap-2 text-[11px] text-amber-200">
-                <span>
-                  {LANGUAGE_LABELS[lang]} runtime is not installed in this container. Switch to Python 3, JavaScript, TypeScript, C, or C++ to run code.
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setLang('python')}
-                  className="font-medium text-amber-300 hover:text-amber-200 underline underline-offset-2 whitespace-nowrap"
-                >
-                  Switch to Python 3
-                </button>
-              </div>
-            )}
-
-            {/* Subtle LeetCode Method Signature Hint Strip when Editor is Empty */}
-            {!code.trim() && (
-              <div className="px-4 py-2 border-b border-neutral-800/60 bg-[#0d0d11] flex flex-wrap items-center justify-between gap-2 text-[11px]">
-                <span className="font-mono text-neutral-400 truncate">
-                  Target:{' '}
-                  <span className="text-neutral-200">
-                    {leetcodeSpec.isDesignClass
-                      ? `class ${leetcodeSpec.methodName}`
-                      : lang === 'c'
-                      ? `${leetcodeSpec.methodName}(${leetcodeSpec.params
-                          .map((p) => p.name)
-                          .join(', ')})`
-                      : `Solution.${leetcodeSpec.methodName}(${leetcodeSpec.params
-                          .map((p) => p.name)
-                          .join(', ')})`}
-                  </span>
-                </span>
-                <button
-                  type="button"
-                  onClick={insertSignatureStub}
-                  className="font-medium text-emerald-400 hover:text-emerald-300 transition-colors whitespace-nowrap"
-                >
-                  Insert empty signature
-                </button>
-              </div>
-            )}
-
-            <div className="flex-1 min-h-0">
-              <Editor
-                height="100%"
-                language={lang}
-                value={code}
-                onChange={(val) => {
-                  editSeqRef.current += 1;
-                  setCode(val || '');
-                  setDebugDirty(true);
-                  setIsPlayingDebug(false);
-                  setDebugRuntimeError(null);
-                }}
-                onMount={handleEditorDidMount}
-                theme="ntree-obsidian"
-                options={{
-                  minimap: { enabled: false },
-                  glyphMargin: true,
-                  fontSize: editorPrefs.fontSize,
-                  lineHeight: Math.round(editorPrefs.fontSize * 1.6),
-                  fontFamily: "'JetBrains Mono', monospace",
-                  scrollBeyondLastLine: false,
-                  automaticLayout: true,
-                  tabSize: editorPrefs.tabSize,
-                  insertSpaces: true,
-                  wordWrap: editorPrefs.wordWrap,
-                  autoClosingBrackets: 'always',
-                  autoClosingQuotes: 'always',
-                  autoIndent: 'full',
-                  formatOnType: true,
-                  matchBrackets: 'always',
-                  bracketPairColorization: { enabled: true },
-                  quickSuggestions: editorPrefs.autocomplete,
-                  suggestOnTriggerCharacters: editorPrefs.autocomplete,
-                  padding: { top: 12, bottom: 12 }
-                }}
-              />
-            </div>
-
-            {(debugSyntaxError || syntaxErrors[0] || debugRuntimeError) &&
-              (() => {
-                const syn = debugSyntaxError || syntaxErrors[0] || null;
-                const errLabel = syn ? 'SyntaxError' : debugRuntimeError!.type;
-                const errLine = syn ? syn.line : debugRuntimeError!.line;
-                const errCol = syn ? syn.column : undefined;
-                const errMsg = syn ? syn.message : debugRuntimeError!.message;
-                return (
-                  <div className="px-4 py-2 border-t border-rose-500/40 bg-rose-950/35 flex items-start justify-between gap-3 text-xs font-mono">
-                    <div className="flex items-start gap-2 text-rose-200 min-w-0">
-                      <XCircle className="w-3.5 h-3.5 text-rose-400 shrink-0 mt-0.5" />
-                      <span className="break-words">
-                        <strong className="text-rose-300">
-                          {errLabel} (Line {errLine}
-                          {errCol ? `:${errCol}` : ''}):
-                        </strong>{' '}
-                        {errMsg}
-                      </span>
+            {!editorCollapsed && (
+              <>
+                {/* Secondary LeetCode Language & Icon Utility Bar */}
+                <div className="h-9 px-3 border-b border-[#363638] bg-[#262626] flex items-center justify-between gap-2 text-xs shrink-0">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div className="relative inline-flex items-center">
+                      <select
+                        aria-label="Editor Language"
+                        value={lang}
+                        onChange={(e) =>
+                          setLang(e.target.value as SolverLanguage)
+                        }
+                        className="appearance-none bg-transparent hover:bg-[#333336] rounded pl-2 pr-6 py-1 text-xs font-medium text-neutral-200 focus:outline-none cursor-pointer transition-colors"
+                      >
+                        <option value="python" className="bg-[#262626] text-neutral-100">
+                          Python 3
+                        </option>
+                        <option value="javascript" className="bg-[#262626] text-neutral-100">
+                          JavaScript
+                        </option>
+                        <option value="typescript" className="bg-[#262626] text-neutral-100">
+                          TypeScript
+                        </option>
+                        <option value="java" className="bg-[#262626] text-neutral-100">
+                          {runtimeAvailability.java === false ? 'Java (Unavailable)' : 'Java'}
+                        </option>
+                        <option value="c" className="bg-[#262626] text-neutral-100">
+                          {runtimeAvailability.c === false ? 'C (Unavailable)' : 'C'}
+                        </option>
+                        <option value="cpp" className="bg-[#262626] text-neutral-100">
+                          {runtimeAvailability.cpp === false ? 'C++ (Unavailable)' : 'C++'}
+                        </option>
+                      </select>
+                      <ChevronDown className="w-3.5 h-3.5 text-neutral-400 pointer-events-none absolute right-1.5" />
                     </div>
+
                     <button
                       type="button"
-                      onClick={() => jumpToLine(errLine)}
-                      className="px-2 py-0.5 rounded border border-rose-500/40 bg-rose-950/60 hover:bg-rose-900/60 text-[11px] text-rose-200 shrink-0 transition-colors"
+                      onClick={() =>
+                        setEditorPrefs((p) => ({ ...p, autocomplete: !p.autocomplete }))
+                      }
+                      title={
+                        editorPrefs.autocomplete
+                          ? 'Auto-complete enabled (click to toggle)'
+                          : 'Auto-complete disabled (click to toggle)'
+                      }
+                      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs transition-colors ${
+                        editorPrefs.autocomplete
+                          ? 'text-neutral-400 hover:text-neutral-200 hover:bg-[#333336]'
+                          : 'text-neutral-500 hover:text-neutral-300 hover:bg-[#333336]'
+                      }`}
                     >
-                      Line {errLine}
+                      <Lock className="w-3 h-3" />
+                      <span>{editorPrefs.autocomplete ? 'Auto' : 'Manual'}</span>
+                    </button>
+
+                    {(() => {
+                      const liveErr = debugSyntaxError || syntaxErrors[0] || null;
+                      if (liveErr) {
+                        return (
+                          <button
+                            type="button"
+                            onClick={() => jumpToLine(liveErr.line)}
+                            className="hidden sm:inline text-[11px] text-rose-400 hover:text-rose-300 font-mono font-semibold whitespace-nowrap truncate"
+                          >
+                            SyntaxError · L{liveErr.line}
+                          </button>
+                        );
+                      }
+                      if (debugRuntimeError) {
+                        return (
+                          <button
+                            type="button"
+                            onClick={() => jumpToLine(debugRuntimeError.line)}
+                            className="hidden sm:inline text-[11px] text-rose-400 hover:text-rose-300 font-mono font-semibold whitespace-nowrap truncate"
+                          >
+                            {debugRuntimeError.type} · L{debugRuntimeError.line}
+                          </button>
+                        );
+                      }
+                      return null;
+                    })()}
+                  </div>
+
+                  {/* Right Icon Utility Strip */}
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      type="button"
+                      onClick={formatEditorCode}
+                      title="Format code"
+                      aria-label="Format code"
+                      className="p-1.5 rounded text-neutral-400 hover:text-white hover:bg-[#333336] transition-colors"
+                    >
+                      <AlignLeft className="w-3.5 h-3.5" />
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setHistoryPanelOpen((open) => !open)}
+                      aria-expanded={historyPanelOpen}
+                      aria-label="Toggle Code Execution History"
+                      title="Code Execution History (last 5 successful runs)"
+                      className={`inline-flex items-center gap-1 px-1.5 py-1 rounded text-[11px] font-medium transition-colors ${
+                        historyPanelOpen
+                          ? 'text-emerald-400 bg-emerald-500/15'
+                          : 'text-neutral-400 hover:text-white hover:bg-[#333336]'
+                      }`}
+                    >
+                      <History className="w-3.5 h-3.5" />
+                      {executionHistory.length > 0 && (
+                        <span className="font-mono text-[10px] tabular-nums">
+                          {executionHistory.length}
+                        </span>
+                      )}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={insertSignatureStub}
+                      title="Insert Solution signature stub"
+                      aria-label="Insert signature stub"
+                      className="p-1.5 rounded text-neutral-400 hover:text-emerald-400 hover:bg-[#333336] transition-colors"
+                    >
+                      <Braces className="w-3.5 h-3.5" />
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        writeDraft(problem.id, lang, '');
+                        insertSignatureStub();
+                      }}
+                      title="Reset to default code definition"
+                      aria-label="Reset to default code definition"
+                      className="p-1.5 rounded text-neutral-400 hover:text-white hover:bg-[#333336] transition-colors"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                    </button>
+
+                    <div className="relative">
+                      <button
+                        type="button"
+                        onClick={() => setSettingsOpen((s) => !s)}
+                        aria-label="Editor settings"
+                        title="Editor settings"
+                        className={`p-1.5 rounded transition-colors ${
+                          settingsOpen
+                            ? 'bg-[#3a3a3e] text-white'
+                            : 'text-neutral-400 hover:text-white hover:bg-[#333336]'
+                        }`}
+                      >
+                        <Settings2 className="w-3.5 h-3.5" />
+                      </button>
+
+                      {settingsOpen && (
+                        <div className="absolute right-0 top-9 z-40 w-60 rounded-lg border border-neutral-700 bg-[#1e1e20] p-3.5 space-y-3 shadow-xl">
+                          <div className="flex items-center justify-between text-xs font-semibold text-white">
+                            <span>Editor Settings</span>
+                            <button
+                              type="button"
+                              onClick={() => setSettingsOpen(false)}
+                              className="text-neutral-400 hover:text-white"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+
+                          <div className="flex items-center justify-between text-xs">
+                            <span className="text-neutral-400">Font Size</span>
+                            <select
+                              value={editorPrefs.fontSize}
+                              onChange={(e) =>
+                                setEditorPrefs((p) => ({
+                                  ...p,
+                                  fontSize: Number(e.target.value)
+                                }))
+                              }
+                              className="bg-[#2b2b2e] border border-neutral-700 rounded px-2 py-0.5 text-xs text-neutral-200 tabular-nums"
+                            >
+                              {[12, 13, 14, 15, 16].map((sz) => (
+                                <option key={sz} value={sz}>
+                                  {sz}px
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+
+                          <div className="flex items-center justify-between text-xs">
+                            <span className="text-neutral-400">Tab Size</span>
+                            <div className="inline-flex rounded border border-neutral-700 bg-[#2b2b2e] p-0.5">
+                              {([2, 4] as const).map((ts) => (
+                                <button
+                                  key={ts}
+                                  type="button"
+                                  onClick={() =>
+                                    setEditorPrefs((p) => ({ ...p, tabSize: ts }))
+                                  }
+                                  className={`px-2 py-0.5 rounded text-[11px] tabular-nums ${
+                                    editorPrefs.tabSize === ts
+                                      ? 'bg-neutral-600 text-white'
+                                      : 'text-neutral-400'
+                                  }`}
+                                >
+                                  {ts}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+
+                          <div className="flex items-center justify-between text-xs">
+                            <span className="text-neutral-400">Word Wrap</span>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setEditorPrefs((p) => ({
+                                  ...p,
+                                  wordWrap: p.wordWrap === 'on' ? 'off' : 'on'
+                                }))
+                              }
+                              className={`px-2 py-0.5 rounded border text-[11px] ${
+                                editorPrefs.wordWrap === 'on'
+                                  ? 'border-emerald-500/50 bg-emerald-500/15 text-emerald-300'
+                                  : 'border-neutral-700 bg-[#2b2b2e] text-neutral-400'
+                              }`}
+                            >
+                              {editorPrefs.wordWrap === 'on' ? 'On' : 'Off'}
+                            </button>
+                          </div>
+
+                          <div className="flex items-center justify-between text-xs">
+                            <span className="text-neutral-400">Autocomplete</span>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setEditorPrefs((p) => ({
+                                  ...p,
+                                  autocomplete: !p.autocomplete
+                                }))
+                              }
+                              className={`px-2 py-0.5 rounded border text-[11px] ${
+                                editorPrefs.autocomplete
+                                  ? 'border-emerald-500/50 bg-emerald-500/15 text-emerald-300'
+                                  : 'border-neutral-700 bg-[#2b2b2e] text-neutral-400'
+                              }`}
+                            >
+                              {editorPrefs.autocomplete ? 'On' : 'Off'}
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Runtime Availability Notice when a language runtime is absent in container */}
+                {runtimeAvailability[lang] === false && (
+                  <div className="px-4 py-1.5 border-b border-amber-800/50 bg-amber-950/35 flex flex-wrap items-center justify-between gap-2 text-[11px] text-amber-200">
+                    <span>
+                      {LANGUAGE_LABELS[lang]} runtime is not installed in this container. Switch to Python 3, JavaScript, TypeScript, C, or C++ to run code.
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setLang('python')}
+                      className="font-medium text-amber-300 hover:text-amber-200 underline underline-offset-2 whitespace-nowrap"
+                    >
+                      Switch to Python 3
                     </button>
                   </div>
-                );
-              })()}
-
-            {/* Editor Bottom Status Bar (Saved draft · Shortcuts · Telemetry · Cursor Ln/Col) */}
-            <div className="h-7 px-3.5 border-t border-neutral-800/80 bg-[#0d0d10] flex items-center justify-between text-[11px] font-mono text-neutral-500">
-              <div className="flex items-center gap-3 min-w-0">
-                <span className="whitespace-nowrap">{code.trim() ? 'Draft saved' : 'Empty'}</span>
-                <span className="hidden sm:inline text-neutral-700">·</span>
-                <span className="hidden sm:inline truncate">
-                  Ctrl+Enter Run · Ctrl+Shift+Enter Submit
-                </span>
-              </div>
-              <div className="flex items-center gap-3 shrink-0">
-                {latestTelemetry && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setBottomTab('result');
-                      setConsoleCollapsed(false);
-                    }}
-                    title="Inspect live execution time & memory tracker"
-                    className="hidden sm:inline-flex items-center gap-1.5 text-[11px] text-neutral-400 hover:text-emerald-400 transition-colors tabular-nums whitespace-nowrap"
-                  >
-                    <span>{latestTelemetry.executionTimeMs} ms</span>
-                    <span className="text-neutral-700">·</span>
-                    <span>{latestTelemetry.memoryUsedMb.toFixed(2)} MB</span>
-                  </button>
                 )}
-                <span className="tabular-nums whitespace-nowrap">
-                  Ln {cursorPos.line}, Col {cursorPos.column}
-                </span>
-              </div>
-            </div>
+
+                {/* Subtle LeetCode Method Signature Hint Strip when Editor is Empty */}
+                {!code.trim() && (
+                  <div className="px-4 py-1.5 border-b border-[#333336] bg-[#222224] flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                    <span className="font-mono text-neutral-400 truncate">
+                      Target:{' '}
+                      <span className="text-neutral-200">
+                        {leetcodeSpec.isDesignClass
+                          ? `class ${leetcodeSpec.methodName}`
+                          : lang === 'c'
+                          ? `${leetcodeSpec.methodName}(${leetcodeSpec.params
+                              .map((p) => p.name)
+                              .join(', ')})`
+                          : `Solution.${leetcodeSpec.methodName}(${leetcodeSpec.params
+                              .map((p) => p.name)
+                              .join(', ')})`}
+                      </span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={insertSignatureStub}
+                      className="font-medium text-emerald-400 hover:text-emerald-300 transition-colors whitespace-nowrap"
+                    >
+                      Insert empty signature
+                    </button>
+                  </div>
+                )}
+
+                <div className="flex-1 min-h-0 bg-[#262626]">
+                  <Editor
+                    height="100%"
+                    language={lang}
+                    value={code}
+                    onChange={(val) => {
+                      editSeqRef.current += 1;
+                      setCode(val || '');
+                      setUndoRevertSnapshot(null);
+                      setRevertedEntryId(null);
+                      setDebugDirty(true);
+                      setIsPlayingDebug(false);
+                      setDebugRuntimeError(null);
+                    }}
+                    onMount={handleEditorDidMount}
+                    theme="ntree-obsidian"
+                    options={{
+                      minimap: { enabled: false },
+                      glyphMargin: true,
+                      fontSize: editorPrefs.fontSize,
+                      lineHeight: Math.round(editorPrefs.fontSize * 1.6),
+                      fontFamily: "'JetBrains Mono', monospace",
+                      scrollBeyondLastLine: false,
+                      automaticLayout: true,
+                      tabSize: editorPrefs.tabSize,
+                      insertSpaces: true,
+                      wordWrap: editorPrefs.wordWrap,
+                      autoClosingBrackets: 'always',
+                      autoClosingQuotes: 'always',
+                      autoIndent: 'full',
+                      formatOnType: true,
+                      matchBrackets: 'always',
+                      bracketPairColorization: { enabled: true },
+                      quickSuggestions: editorPrefs.autocomplete,
+                      suggestOnTriggerCharacters: editorPrefs.autocomplete,
+                      padding: { top: 12, bottom: 12 }
+                    }}
+                  />
+                </div>
+
+                {(debugSyntaxError || syntaxErrors[0] || debugRuntimeError) &&
+                  (() => {
+                    const syn = debugSyntaxError || syntaxErrors[0] || null;
+                    const errLabel = syn ? 'SyntaxError' : debugRuntimeError!.type;
+                    const errLine = syn ? syn.line : debugRuntimeError!.line;
+                    const errCol = syn ? syn.column : undefined;
+                    const errMsg = syn ? syn.message : debugRuntimeError!.message;
+                    return (
+                      <div className="px-4 py-2 border-t border-rose-500/40 bg-rose-950/40 flex items-start justify-between gap-3 text-xs font-mono">
+                        <div className="flex items-start gap-2 text-rose-200 min-w-0">
+                          <XCircle className="w-3.5 h-3.5 text-rose-400 shrink-0 mt-0.5" />
+                          <span className="break-words">
+                            <strong className="text-rose-300">
+                              {errLabel} (Line {errLine}
+                              {errCol ? `:${errCol}` : ''}):
+                            </strong>{' '}
+                            {errMsg}
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => jumpToLine(errLine)}
+                          className="px-2 py-0.5 rounded border border-rose-500/40 bg-rose-950/60 hover:bg-rose-900/60 text-[11px] text-rose-200 shrink-0 transition-colors"
+                        >
+                          Line {errLine}
+                        </button>
+                      </div>
+                    );
+                  })()}
+
+                {/* LeetCode Editor Bottom Bar: Ln X, Col Y | Saved  ...  [Debug] [Run] [Submit] */}
+                <div className="h-11 px-3.5 border-t border-[#333336] bg-[#262626] flex items-center justify-between gap-3 shrink-0">
+                  <div className="flex items-center gap-2.5 text-xs text-neutral-400 min-w-0">
+                    <span className="font-sans tabular-nums whitespace-nowrap">
+                      Ln {cursorPos.line}, Col {cursorPos.column}
+                    </span>
+                    <span className="text-neutral-600">|</span>
+                    <span className="whitespace-nowrap">
+                      {code.trim() ? 'Saved' : 'Empty'}
+                    </span>
+                    {latestTelemetry && (
+                      <>
+                        <span className="hidden xl:inline text-neutral-600">|</span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setBottomTab('result');
+                            setConsoleCollapsed(false);
+                          }}
+                          title="Inspect live execution time & memory tracker"
+                          className="hidden xl:inline-flex items-center gap-1.5 font-mono text-[11px] text-neutral-400 hover:text-emerald-400 transition-colors tabular-nums whitespace-nowrap"
+                        >
+                          <span>{latestTelemetry.executionTimeMs} ms</span>
+                          <span className="text-neutral-600">·</span>
+                          <span>{latestTelemetry.memoryUsedMb.toFixed(2)} MB</span>
+                        </button>
+                      </>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => handleVisualiseCode(false)}
+                      disabled={isDebugging}
+                      title="Debug / Visualise line-by-line execution"
+                      aria-label="Debug code"
+                      className={`p-1.5 rounded-md transition-colors ${
+                        leftTab === 'visualiser'
+                          ? 'bg-amber-500/20 text-amber-300'
+                          : 'text-amber-400 hover:bg-[#3a3a3d]'
+                      } disabled:opacity-50`}
+                    >
+                      {isDebugging ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Bug className="w-4 h-4" />
+                      )}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => executeJudge(false)}
+                      disabled={isRunning}
+                      title="Run testcases (Ctrl+Enter)"
+                      className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-md bg-[#3a3a3d] hover:bg-[#48484c] text-neutral-100 text-xs font-medium transition-colors disabled:opacity-50 whitespace-nowrap"
+                    >
+                      {isRunning && !judgeResult?.isSubmit && (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-400" />
+                      )}
+                      <span>Run</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => executeJudge(true)}
+                      disabled={isRunning}
+                      title="Submit solution (Ctrl+Shift+Enter)"
+                      className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-[#2cbb5d] hover:bg-[#26a651] text-white text-xs font-semibold transition-colors disabled:opacity-50 whitespace-nowrap"
+                    >
+                      {isRunning && judgeResult?.isSubmit && (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      )}
+                      <span>Submit</span>
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
           </div>
 
           {/* Vertical Drag Resizer */}
@@ -2353,7 +2581,7 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
             onMouseDown={startVerticalResize}
             className="h-2 shrink-0 cursor-row-resize flex items-center justify-center group"
           >
-            <div className="h-0.5 w-12 rounded-full bg-neutral-800 group-hover:bg-emerald-400 transition-colors" />
+            <div className="h-1 w-10 rounded-full bg-[#3a3a3d] group-hover:bg-emerald-400 transition-colors" />
           </div>
 
           {/* Bottom Testcase / Test Result Panel */}
@@ -2361,36 +2589,39 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
             style={{
               height: consoleCollapsed ? '38px' : `${consoleHeightPx}px`
             }}
-            className="shrink-0 rounded-lg border border-neutral-800 bg-[#0b0b0e] flex flex-col overflow-hidden transition-[height] duration-75"
+            className="shrink-0 rounded-lg border border-[#3a3a3c] bg-[#262626] flex flex-col overflow-hidden transition-[height] duration-75"
           >
-            <div className="h-[38px] px-4 border-b border-neutral-800 bg-[#101014] flex items-center justify-between shrink-0">
-              <div className="flex items-center gap-5 text-[11px] font-semibold uppercase tracking-wider">
+            <div className="h-[38px] px-3.5 border-b border-[#363638] bg-[#303033] flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-4 text-xs font-medium">
                 <button
                   type="button"
                   onClick={() => {
                     setBottomTab('cases');
                     setConsoleCollapsed(false);
                   }}
-                  className={`py-2.5 border-b-2 transition-colors whitespace-nowrap ${
+                  className={`inline-flex items-center gap-1.5 py-2 border-b-2 transition-colors whitespace-nowrap ${
                     bottomTab === 'cases'
                       ? 'border-white text-white'
-                      : 'border-transparent text-neutral-500 hover:text-neutral-300'
+                      : 'border-transparent text-neutral-400 hover:text-neutral-200'
                   }`}
                 >
-                  Testcase
+                  <CheckSquare className="w-3.5 h-3.5 text-[#2cbb5d]" />
+                  <span>Testcase</span>
                 </button>
+                <span className="text-neutral-600">|</span>
                 <button
                   type="button"
                   onClick={() => {
                     setBottomTab('result');
                     setConsoleCollapsed(false);
                   }}
-                  className={`py-2.5 border-b-2 transition-colors whitespace-nowrap inline-flex items-center gap-1.5 ${
+                  className={`inline-flex items-center gap-1.5 py-2 border-b-2 transition-colors whitespace-nowrap ${
                     bottomTab === 'result'
                       ? 'border-white text-white'
-                      : 'border-transparent text-neutral-500 hover:text-neutral-300'
+                      : 'border-transparent text-neutral-400 hover:text-neutral-200'
                   }`}
                 >
+                  <TerminalSquare className="w-3.5 h-3.5 text-[#2cbb5d]" />
                   <span>Test Result</span>
                   {judgeResult && (
                     <span
@@ -2680,7 +2911,54 @@ export const ProblemSolverView: React.FC<ProblemSolverViewProps> = ({
             )}
           </div>
         </section>
+
+        {/* Right Side Panel: Code Execution History (Docked on lg+ when editor not maximized) */}
+        {historyPanelOpen && !editorMaximized && (
+          <div className="hidden lg:block w-72 xl:w-80 shrink-0 pl-2 min-h-0">
+            <CodeExecutionHistoryPanel
+              entries={executionHistory}
+              currentCode={code}
+              currentLang={lang}
+              undoSnapshot={undoRevertSnapshot}
+              revertedEntryId={revertedEntryId}
+              onRevert={handleRevertExecution}
+              onUndoRevert={handleUndoRevert}
+              onClear={handleClearExecutionHistory}
+              onClose={() => setHistoryPanelOpen(false)}
+            />
+          </div>
+        )}
       </div>
+
+      {/* Responsive Slide-Over Drawer for Code Execution History (< lg or when editor is maximized) */}
+      {historyPanelOpen && (
+        <div
+          className={`fixed inset-0 z-50 flex justify-end ${
+            editorMaximized ? '' : 'lg:hidden'
+          }`}
+        >
+          <div
+            className="fixed inset-0 bg-black/60 backdrop-blur-[1px]"
+            onClick={() => setHistoryPanelOpen(false)}
+          />
+          <div className="relative z-10 w-80 sm:w-96 max-w-full h-full p-2 bg-[#0a0a0a]">
+            <CodeExecutionHistoryPanel
+              entries={executionHistory}
+              currentCode={code}
+              currentLang={lang}
+              undoSnapshot={undoRevertSnapshot}
+              revertedEntryId={revertedEntryId}
+              onRevert={(entry) => {
+                handleRevertExecution(entry);
+                setHistoryPanelOpen(false);
+              }}
+              onUndoRevert={handleUndoRevert}
+              onClear={handleClearExecutionHistory}
+              onClose={() => setHistoryPanelOpen(false)}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 };
