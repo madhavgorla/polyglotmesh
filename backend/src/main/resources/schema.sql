@@ -8,8 +8,8 @@ CREATE TABLE IF NOT EXISTS saved_scripts (
     code TEXT NOT NULL,
     description VARCHAR(300),
     author VARCHAR(80),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS execution_history (
@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS execution_history (
     execution_time_ms BIGINT NOT NULL,
     success BOOLEAN NOT NULL,
     engine VARCHAR(100),
-    executed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    executed_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_saved_scripts_updated_at ON saved_scripts (updated_at DESC);
