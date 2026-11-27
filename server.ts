@@ -1,7 +1,8 @@
 import express from 'express';
-import type { Request, Response } from 'express';
+import type { NextFunction, Request, Response } from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import http from 'http';
 import { spawn, execSync } from 'child_process';
 import vm from 'vm';
 import fs from 'fs';
@@ -24,6 +25,58 @@ const app = express();
 const PORT = 3000;
 
 app.use(express.json({ limit: '128kb' }));
+
+// ---- Backend proxy (opt-in) -------------------------------------------------
+// Set POLYGLOT_PROXY_BACKEND=1 to forward /api/* requests to the real Java/GraalVM
+// Spring Boot backend instead of the built-in in-process mock (server.ts) sandbox.
+// Backend URL is configurable via BACKEND_URL (default http://localhost:8080).
+const PROXY_BACKEND = process.env.POLYGLOT_PROXY_BACKEND === '1';
+const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:8080';
+
+function proxyToBackend(req: Request, res: Response, next: NextFunction) {
+  const backendTarget = new URL(BACKEND_URL);
+  const pathname = req.originalUrl;
+  const headers: Record<string, string> = { ...(req.headers as Record<string, string>) };
+  headers['host'] = backendTarget.host;
+
+  let body: Buffer | null = null;
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    body = Buffer.isBuffer(req.body) ? req.body : Buffer.from(JSON.stringify(req.body ?? {}));
+    headers['content-length'] = String(body.length);
+  }
+
+  const proxyReq = http.request(
+    {
+      hostname: backendTarget.hostname,
+      port: backendTarget.port || (backendTarget.protocol === 'https:' ? 443 : 80),
+      path: pathname,
+      method: req.method,
+      headers,
+    },
+    (proxyRes) => {
+      res.status(proxyRes.statusCode || 502);
+      for (const [k, v] of Object.entries(proxyRes.headers)) {
+        if (v !== undefined) res.setHeader(k, v);
+      }
+      proxyRes.pipe(res);
+    }
+  );
+  proxyReq.on('error', (err) => {
+    console.error(`[PolyglotMesh] Backend proxy error for ${req.method} ${pathname}:`, err.message);
+    res.status(502).json({
+      success: false,
+      error: 'Backend unavailable. Start the Java backend (mvn spring-boot:run) or run without POLYGLOT_PROXY_BACKEND=1.',
+    });
+  });
+  if (body) proxyReq.write(body);
+  proxyReq.end();
+}
+
+if (PROXY_BACKEND) {
+  app.use('/api', proxyToBackend);
+  console.log(`[PolyglotMesh] /api/* requests proxied to ${BACKEND_URL}`);
+}
+// -----------------------------------------------------------------------------
 
 // Detect real runtime availability in the current environment
 function checkCommandAvailable(cmd: string): boolean {

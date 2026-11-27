@@ -66,17 +66,27 @@ public class CrossLanguageInteropService {
             // Step 3: Guest script reads & transforms the data directly
             Value resultValue = context.eval(graalLang, guestScript);
 
-            // Step 4: Java retrieves the resulting map directly from GraalVM Value
+            // Step 4: Java retrieves the resulting map directly from GraalVM Value.
+            // A guest dict (Python) exposes its *data* through the hash-entry API, while its
+            // member view (getMemberKeys()) returns built-in methods (pop, get, keys, ...), not
+            // data keys. A guest object (JS) exposes data through members. Branch on which view
+            // the value actually carries so we never try to read a built-in method as a string.
             Map<String, Object> transformed = new LinkedHashMap<>();
-            if (resultValue.hasMembers()) {
+            if (resultValue.hasHashEntries()) {
+                Value keyIterator = resultValue.getHashKeysIterator();
+                while (keyIterator.hasIteratorNextElement()) {
+                    Value key = keyIterator.getIteratorNextElement();
+                    Value member = resultValue.getHashValue(key);
+                    Object coerced = coerceGuestValue(member);
+                    if (coerced != null) {
+                        transformed.put(key.asString(), coerced);
+                    }
+                }
+            } else if (resultValue.hasMembers()) {
                 for (String key : resultValue.getMemberKeys()) {
-                    Value member = resultValue.getMember(key);
-                    if (member.isNumber()) {
-                        transformed.put(key, member.fitsInLong() ? member.asLong() : member.asDouble());
-                    } else if (member.isBoolean()) {
-                        transformed.put(key, member.asBoolean());
-                    } else {
-                        transformed.put(key, member.asString());
+                    Object coerced = coerceGuestValue(resultValue.getMember(key));
+                    if (coerced != null) {
+                        transformed.put(key, coerced);
                     }
                 }
             }
@@ -94,18 +104,46 @@ public class CrossLanguageInteropService {
         }
     }
 
+    /**
+     * Safely coerce a guest scalar to a plain Java value (Long/Double/Boolean/String).
+     * Nested containers (dicts/lists) fall back to a readable string instead of crashing on a
+     * forced {@code asString()} that would throw ClassCastException for non-string guests.
+     */
+    private Object coerceGuestValue(Value value) {
+        if (value == null || value.isNull()) {
+            return null;
+        }
+        if (value.isNumber()) {
+            return value.fitsInLong() ? value.asLong() : value.asDouble();
+        }
+        if (value.isBoolean()) {
+            return value.asBoolean();
+        }
+        if (value.isString()) {
+            return value.asString();
+        }
+        try {
+            return value.toString();
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
     private String defaultTransformScript(String graalLang) {
         if ("python".equals(graalLang)) {
+            // NOTE: ProxyObject.fromMap() exposes the Java map to Python as a 'foreign' object,
+            // which supports attribute access (pricingData.key) but NOT subscript access
+            // (pricingData["key"] throws TypeError: 'foreign' object is not subscriptable).
             return """
-                subtotal = pricingData["basePrice"] * pricingData["quantity"]
-                tier = pricingData["discountTier"]
+                subtotal = pricingData.basePrice * pricingData.quantity
+                tier = pricingData.discountTier
                 discount_rate = 0.20 if tier == "ENTERPRISE" else (0.10 if tier == "PRO" else 0.0)
                 discount_amount = round(subtotal * discount_rate, 2)
                 taxable = subtotal - discount_amount
-                tax_amount = round(taxable * pricingData["taxRate"], 2)
+                tax_amount = round(taxable * pricingData.taxRate, 2)
                 final_total = round(taxable + tax_amount, 2)
                 {
-                    "currency": pricingData["currency"],
+                    "currency": pricingData.currency,
                     "subtotal": round(subtotal, 2),
                     "discountRate": discount_rate,
                     "discountAmount": discount_amount,
